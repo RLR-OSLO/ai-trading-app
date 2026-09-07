@@ -2,7 +2,7 @@ import unittest
 from decimal import Decimal
 
 from trader.config import DEFAULT_CONFIG
-from trader.simulation import bullish_momentum, simulate_long_trade
+from trader.simulation import bullish_momentum, paper_signal_from_klines, simulate_long_trade
 
 
 class SimulationTests(unittest.TestCase):
@@ -28,6 +28,10 @@ class SimulationTests(unittest.TestCase):
     def test_bullish_momentum_requires_enough_data(self) -> None:
         with self.assertRaises(ValueError):
             bullish_momentum([Decimal("1")] * 21)
+
+    def test_paper_signal_reads_kline_close_column(self) -> None:
+        rows = [[0, "0", "0", "0", str(100 + i)] for i in range(22)]
+        self.assertTrue(paper_signal_from_klines(rows))
 
 
 if __name__ == "__main__":
