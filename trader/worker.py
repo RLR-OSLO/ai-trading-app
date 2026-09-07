@@ -6,6 +6,7 @@ import time
 
 from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
 from .config import DEFAULT_CONFIG
+from .simulation import paper_signal_from_klines
 
 
 LOG = logging.getLogger("ai_trader")
@@ -52,6 +53,14 @@ def readiness_check(client: BinanceSpotClient) -> bool:
     return False
 
 
+def paper_scan(client: BinanceSpotClient) -> dict[str, bool]:
+    """Read market data and return paper signals without placing orders."""
+    return {
+        pair: paper_signal_from_klines(client.klines(pair, "15m", limit=100))
+        for pair in configured_pairs()
+    }
+
+
 def main() -> None:
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO"),
@@ -71,6 +80,11 @@ def main() -> None:
             LOG.info(
                 "health check passed; authenticated_account_read=%s",
                 authenticated,
+            )
+            signals = paper_scan(client)
+            LOG.info(
+                "paper scan; buy_signals=%s",
+                ",".join(pair for pair, signal in signals.items() if signal) or "none",
             )
         except Exception:
             LOG.exception("health check failed; no orders will be submitted")
