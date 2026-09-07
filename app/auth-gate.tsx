@@ -33,7 +33,12 @@ export default function AuthGate({ children }: Readonly<{ children: React.ReactN
       return;
     }
 
-    const { data: factors } = await supabase.auth.mfa.listFactors();
+    const { data: factors, error: factorsError } = await supabase.auth.mfa.listFactors();
+    if (factorsError) {
+      setMessage(factorsError.message);
+      setState("error");
+      return;
+    }
     const verified = factors?.totp.find((factor) => factor.status === "verified");
     if (verified) {
       const { data, error } = await supabase.auth.mfa.challenge({ factorId: verified.id });
@@ -46,6 +51,21 @@ export default function AuthGate({ children }: Readonly<{ children: React.ReactN
       setChallengeId(data.id);
       setState("verify");
       return;
+    }
+
+    // An interrupted enrollment leaves an unverified factor behind. Supabase
+    // requires friendly names to be unique, so remove stale attempts before
+    // creating a fresh QR code.
+    const staleFactors = factors?.all.filter(
+      (factor) => factor.factor_type === "totp" && factor.status === "unverified",
+    ) ?? [];
+    for (const factor of staleFactors) {
+      const { error } = await supabase.auth.mfa.unenroll({ factorId: factor.id });
+      if (error) {
+        setMessage(error.message);
+        setState("error");
+        return;
+      }
     }
 
     const { data, error } = await supabase.auth.mfa.enroll({ factorType: "totp", friendlyName: "AI Trading App" });
