@@ -3,8 +3,8 @@ import hmac
 import unittest
 from decimal import Decimal
 
-from trader.binance import BinanceError, BinanceSpotClient
-from trader.worker import configured_pairs
+from trader.binance import BinanceCredentials, BinanceError, BinanceSpotClient
+from trader.worker import configured_pairs, readiness_check
 
 
 class BinanceClientTests(unittest.TestCase):
@@ -35,6 +35,21 @@ class BinanceClientTests(unittest.TestCase):
             configured_pairs(),
             ("BTCUSDC", "ETHUSDC", "SOLUSDC", "BNBUSDC", "XRPUSDC"),
         )
+
+    def test_readiness_uses_signed_account_check_when_configured(self) -> None:
+        class ReadyClient:
+            credentials = BinanceCredentials("api", "secret")
+
+            def server_time(self):
+                return 1
+
+            def exchange_info(self, symbols):
+                return {"symbols": [{"symbol": symbol} for symbol in symbols]}
+
+            def account(self):
+                return {"canTrade": False}
+
+        self.assertTrue(readiness_check(ReadyClient()))
 
 
 if __name__ == "__main__":
