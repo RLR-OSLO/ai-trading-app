@@ -38,7 +38,7 @@ def build_client() -> BinanceSpotClient:
     )
 
 
-def readiness_check(client: BinanceSpotClient) -> None:
+def readiness_check(client: BinanceSpotClient) -> bool:
     pairs = configured_pairs()
     client.server_time()
     info = client.exchange_info(pairs)
@@ -46,6 +46,10 @@ def readiness_check(client: BinanceSpotClient) -> None:
     missing = set(pairs) - available
     if missing:
         raise BinanceError(f"Approved pairs unavailable: {sorted(missing)}")
+    if client.credentials is not None:
+        client.account()
+        return True
+    return False
 
 
 def main() -> None:
@@ -63,8 +67,11 @@ def main() -> None:
 
     while True:
         try:
-            readiness_check(client)
-            LOG.info("health check passed")
+            authenticated = readiness_check(client)
+            LOG.info(
+                "health check passed; authenticated_account_read=%s",
+                authenticated,
+            )
         except Exception:
             LOG.exception("health check failed; no orders will be submitted")
         time.sleep(60)
@@ -72,4 +79,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
