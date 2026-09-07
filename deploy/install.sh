@@ -48,7 +48,8 @@ chmod 640 "${ENV_FILE}"
 cp "${APP_DIR}/deploy/ai-trading-app.service" "${SERVICE_FILE}"
 chmod 644 "${SERVICE_FILE}"
 systemctl daemon-reload
-systemctl enable --now ai-trading-app.service
+systemctl enable ai-trading-app.service
+systemctl restart ai-trading-app.service
 sleep 3
 
 if systemctl is-active --quiet ai-trading-app.service; then
@@ -57,4 +58,3 @@ else
   journalctl -u ai-trading-app.service --no-pager -n 30
   exit 1
 fi
-
