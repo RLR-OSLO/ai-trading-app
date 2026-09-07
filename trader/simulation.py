@@ -77,3 +77,13 @@ def simulate_long_trade(
         pnl_after_fees=gross - fees,
         exit_reason=reason,
     )
+
+
+def paper_signal_from_klines(klines: Sequence[Sequence[object]]) -> bool:
+    """Evaluate the paper-trading momentum signal from Binance kline rows."""
+    closes: list[Decimal] = []
+    for row in klines:
+        if len(row) < 5:
+            raise ValueError("Kline row is missing the close price")
+        closes.append(Decimal(str(row[4])))
+    return bullish_momentum(closes)
