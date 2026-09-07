@@ -39,7 +39,9 @@ chown trader:trader "${STATE_DIR}"
 chown -R root:root "${APP_DIR}"
 # Git inherits the caller's umask. Set deterministic read/execute permissions
 # so the unprivileged service user can load code without being able to edit it.
-chmod -R u=rwX,go=rX "${APP_DIR}"
+find "${APP_DIR}" -type d -exec chmod 755 {} +
+find "${APP_DIR}" -type f -exec chmod 644 {} +
+chmod 755 "${APP_DIR}/deploy/install.sh"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   cp "${APP_DIR}/.env.example" "${ENV_FILE}"
