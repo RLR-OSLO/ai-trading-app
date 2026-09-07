@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging
 import os
 import time
+from pathlib import Path
 
 from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
 from .config import DEFAULT_CONFIG
+from .live import LiveLimits, run_live_cycle
 from .simulation import paper_signal_from_klines
 
 
@@ -86,6 +88,14 @@ def main() -> None:
                 "paper scan; buy_signals=%s",
                 ",".join(pair for pair, signal in signals.items() if signal) or "none",
             )
+            if live:
+                result = run_live_cycle(
+                    client,
+                    signals,
+                    Path(os.getenv("LIVE_STATE_PATH", "/var/lib/ai-trading-app/live-state.json")),
+                    LiveLimits.from_env(),
+                )
+                LOG.warning("live cycle result=%s", result)
         except Exception:
             LOG.exception("health check failed; no orders will be submitted")
         time.sleep(60)

@@ -106,6 +106,35 @@ class BinanceSpotClient:
     def account(self) -> dict[str, Any]:
         return self._request("GET", "/api/v3/account", signed=True)
 
+    def ticker_price(self, symbol: str) -> Decimal:
+        response = self._request("GET", "/api/v3/ticker/price", {"symbol": symbol})
+        return Decimal(str(response["price"]))
+
+    def symbol_info(self, symbol: str) -> dict[str, Any]:
+        response = self._request("GET", "/api/v3/exchangeInfo", {"symbol": symbol})
+        symbols = response.get("symbols", [])
+        if len(symbols) != 1:
+            raise BinanceError(f"Symbol unavailable: {symbol}")
+        return symbols[0]
+
+    def test_market_buy(self, *, symbol: str, quote_quantity: Decimal) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/v3/order/test",
+            {"symbol": symbol, "side": "BUY", "type": "MARKET", "quoteOrderQty": format(quote_quantity, "f")},
+            signed=True,
+        )
+
+    def market_buy_by_quote(self, *, symbol: str, quote_quantity: Decimal, live_trading_enabled: bool) -> dict[str, Any]:
+        if not live_trading_enabled:
+            raise BinanceError("Live trading safety lock is disabled")
+        return self._request(
+            "POST",
+            "/api/v3/order",
+            {"symbol": symbol, "side": "BUY", "type": "MARKET", "quoteOrderQty": format(quote_quantity, "f"), "newOrderRespType": "FULL"},
+            signed=True,
+        )
+
     def place_spot_order(
         self,
         *,
@@ -130,4 +159,3 @@ class BinanceSpotClient:
         }
         params.update(extra or {})
         return self._request("POST", "/api/v3/order", params, signed=True)
-
