@@ -37,7 +37,9 @@ fi
 mkdir -p "${STATE_DIR}"
 chown trader:trader "${STATE_DIR}"
 chown -R root:root "${APP_DIR}"
-chmod -R go-w "${APP_DIR}"
+# Git inherits the caller's umask. Set deterministic read/execute permissions
+# so the unprivileged service user can load code without being able to edit it.
+chmod -R u=rwX,go=rX "${APP_DIR}"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   cp "${APP_DIR}/.env.example" "${ENV_FILE}"
