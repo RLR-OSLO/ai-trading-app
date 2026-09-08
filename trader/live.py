@@ -14,6 +14,11 @@ from .binance import BinanceError, BinanceSpotClient
 
 
 ABSOLUTE_CAP_USDC = Decimal("100")
+PROFILE_LIMITS = {
+    "low": (6, 1800),
+    "normal": (8, 900),
+    "high": (12, 300),
+}
 
 
 @dataclass
@@ -53,27 +58,43 @@ class LiveLimits:
             os.getenv("LIVE_STOP_PERCENT", "1"),
             os.getenv("LIVE_TARGET_PERCENT", "2"),
             os.getenv("LIVE_DAILY_LOSS_USDC", "2"),
+            max_trades=int(os.getenv("LIVE_MAX_TRADES_PER_DAY", "8")),
+            cooldown=int(os.getenv("LIVE_COOLDOWN_SECONDS", "900")),
         )
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any]) -> "LiveLimits":
+        profile = str(settings.get("risk_profile", "normal")).lower()
+        max_trades, cooldown = PROFILE_LIMITS.get(profile, PROFILE_LIMITS["normal"])
         return cls.from_values(
             settings.get("trade_cap_usdc", "100"),
             settings.get("order_size_usdc", "25"),
             settings.get("stop_loss_percent", "1"),
             settings.get("take_profit_percent", "2"),
             settings.get("max_daily_loss_usdc", "2"),
+            max_trades=max_trades,
+            cooldown=cooldown,
         )
 
     @classmethod
-    def from_values(cls, cap_value: Any, order_value: Any, stop_value: Any, target_value: Any, daily_loss_value: Any) -> "LiveLimits":
+    def from_values(
+        cls,
+        cap_value: Any,
+        order_value: Any,
+        stop_value: Any,
+        target_value: Any,
+        daily_loss_value: Any,
+        *,
+        max_trades: int | None = None,
+        cooldown: int | None = None,
+    ) -> "LiveLimits":
         cap = Decimal(str(cap_value))
         order = Decimal(str(order_value))
         stop = Decimal(str(stop_value)) / Decimal("100")
         target = Decimal(str(target_value)) / Decimal("100")
         daily_loss = Decimal(str(daily_loss_value))
-        max_trades = int(os.getenv("LIVE_MAX_TRADES_PER_DAY", "6"))
-        cooldown = int(os.getenv("LIVE_COOLDOWN_SECONDS", "1800"))
+        max_trades = max_trades if max_trades is not None else int(os.getenv("LIVE_MAX_TRADES_PER_DAY", "8"))
+        cooldown = cooldown if cooldown is not None else int(os.getenv("LIVE_COOLDOWN_SECONDS", "900"))
         if not (Decimal("5") <= cap <= ABSOLUTE_CAP_USDC):
             raise ValueError("LIVE_CAP_USDC must be between 5 and the absolute 100 USDC cap")
         if not (Decimal("5") <= order <= cap):
@@ -86,6 +107,8 @@ class LiveLimits:
             raise ValueError("LIVE_DAILY_LOSS_USDC is outside the safety range")
         if not (1 <= max_trades <= 12):
             raise ValueError("LIVE_MAX_TRADES_PER_DAY must be between 1 and 12")
+        if not (60 <= cooldown <= 86_400):
+            raise ValueError("LIVE_COOLDOWN_SECONDS is outside the safety range")
         return cls(cap, order, stop, target, daily_loss, max_trades, cooldown)
 
 
@@ -98,7 +121,14 @@ def load_state(path: Path) -> LiveState:
         return LiveState(day=_today())
     raw = json.loads(path.read_text(encoding="utf-8"))
     position = Position(**raw["position"]) if raw.get("position") else None
-    state = LiveState(day=raw["day"], realized_pnl=raw.get("realized_pnl", "0"), trades_today=int(raw.get("trades_today", 0)), cooldown_until=int(raw.get("cooldown_until", 0)), position=position, pending_action=raw.get("pending_action"))
+    state = LiveState(
+        day=raw["day"],
+        realized_pnl=raw.get("realized_pnl", "0"),
+        trades_today=int(raw.get("trades_today", 0)),
+        cooldown_until=int(raw.get("cooldown_until", 0)),
+        position=position,
+        pending_action=raw.get("pending_action"),
+    )
     if state.day != _today():
         state.day, state.realized_pnl, state.trades_today = _today(), "0", 0
     return state
@@ -141,15 +171,20 @@ def run_live_cycle(
     state_path: Path,
     limits: LiveLimits,
     report_trade: Callable[[dict[str, Any]], None] | None = None,
+    *,
+    allow_new_entries: bool = True,
+    quote_asset: str = "USDC",
 ) -> str:
     state = load_state(state_path)
     now = int(time.time())
     realized = Decimal(state.realized_pnl)
+    quote_asset = quote_asset.upper()
+
     if state.pending_action:
         return f"paused_pending_reconciliation:{state.pending_action}"
-    if realized <= -limits.daily_loss:
-        return "paused_daily_loss"
 
+    # Existing positions are always managed, even when new entries are paused
+    # or the daily loss limit has been reached.
     if state.position:
         position = state.position
         current = client.ticker_price(position.symbol)
@@ -159,9 +194,17 @@ def run_live_cycle(
         if stop < current < target:
             return f"holding:{position.symbol}"
         quantity = _sellable_quantity(client, position.symbol, Decimal(position.quantity))
+        if quantity <= 0:
+            raise BinanceError("No sellable quantity remains for the open position")
         state.pending_action = f"SELL:{position.symbol}"
         save_state(state_path, state)
-        order = client.place_spot_order(symbol=position.symbol, side="SELL", order_type="MARKET", quantity=quantity, live_trading_enabled=True)
+        order = client.place_spot_order(
+            symbol=position.symbol,
+            side="SELL",
+            order_type="MARKET",
+            quantity=quantity,
+            live_trading_enabled=True,
+        )
         received = Decimal(str(order.get("cummulativeQuoteQty", "0")))
         pnl = received - Decimal(position.quote_spent)
         state.realized_pnl = str(realized + pnl)
@@ -171,34 +214,67 @@ def run_live_cycle(
         state.cooldown_until = now + limits.cooldown_seconds
         save_state(state_path, state)
         if report_trade:
-            report_trade({"symbol": position.symbol, "side": "SELL", "quantity": str(quantity), "entry_price": position.entry_price, "exit_price": str(received / quantity), "pnl": str(pnl)})
+            report_trade({
+                "symbol": position.symbol,
+                "side": "SELL",
+                "quantity": str(quantity),
+                "entry_price": position.entry_price,
+                "exit_price": str(received / quantity),
+                "pnl": str(pnl),
+            })
         return f"sold:{position.symbol}:pnl={pnl}"
 
+    if not allow_new_entries:
+        return "paused_new_entries"
+    if realized <= -limits.daily_loss:
+        return "paused_daily_loss"
     if state.trades_today >= limits.max_trades_per_day:
         return "paused_trade_limit"
     if now < state.cooldown_until:
         return "cooldown"
+
     candidates = [symbol for symbol, active in signals.items() if active]
     if not candidates:
         return "no_signal"
-    if _free_balance(client, "USDC") < limits.order_size:
-        return "insufficient_usdc"
+    if _free_balance(client, quote_asset) < limits.order_size:
+        return f"insufficient_{quote_asset.lower()}"
 
     symbol = candidates[0]
+    if not symbol.endswith(quote_asset):
+        raise BinanceError(f"Signal symbol {symbol} does not match quote asset {quote_asset}")
     client.test_market_buy(symbol=symbol, quote_quantity=limits.order_size)
     state.pending_action = f"BUY:{symbol}"
     save_state(state_path, state)
-    order = client.market_buy_by_quote(symbol=symbol, quote_quantity=limits.order_size, live_trading_enabled=True)
+    order = client.market_buy_by_quote(
+        symbol=symbol,
+        quote_quantity=limits.order_size,
+        live_trading_enabled=True,
+    )
     spent = Decimal(str(order.get("cummulativeQuoteQty", "0")))
     executed = Decimal(str(order.get("executedQty", "0")))
     if spent <= 0 or executed <= 0:
         raise BinanceError("Live buy returned no executed quantity")
-    base_asset = symbol.removesuffix("USDC")
+    base_asset = symbol.removesuffix(quote_asset)
     net_quantity = _net_acquired(order, base_asset)
-    state.position = Position(symbol=symbol, quantity=str(net_quantity), entry_price=str(spent / executed), quote_spent=str(spent), opened_at=now)
+    if net_quantity <= 0:
+        raise BinanceError("Live buy returned no net acquired quantity")
+    state.position = Position(
+        symbol=symbol,
+        quantity=str(net_quantity),
+        entry_price=str(spent / executed),
+        quote_spent=str(spent),
+        opened_at=now,
+    )
     state.pending_action = None
     state.trades_today += 1
     save_state(state_path, state)
     if report_trade:
-        report_trade({"symbol": symbol, "side": "BUY", "quantity": str(net_quantity), "entry_price": str(spent / executed), "exit_price": None, "pnl": None})
+        report_trade({
+            "symbol": symbol,
+            "side": "BUY",
+            "quantity": str(net_quantity),
+            "entry_price": str(spent / executed),
+            "exit_price": None,
+            "pnl": None,
+        })
     return f"bought:{symbol}:spent={spent}"
