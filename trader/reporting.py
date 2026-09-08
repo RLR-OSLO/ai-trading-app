@@ -40,7 +40,7 @@ class SupabaseReporter:
     def get_settings(self) -> dict[str, Any] | None:
         query = urllib.parse.urlencode({
             "user_id": f"eq.{self.user_id}",
-            "select": "bot_enabled,live_trading_enabled,trade_cap_usdc,order_size_usdc,stop_loss_percent,take_profit_percent,max_daily_loss_usdc",
+            "select": "bot_enabled,live_trading_enabled,risk_profile,quote_asset,trade_cap_usdc,order_size_usdc,stop_loss_percent,take_profit_percent,max_daily_loss_usdc",
             "limit": "1",
         })
         request = urllib.request.Request(
