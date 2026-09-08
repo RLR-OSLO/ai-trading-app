@@ -70,7 +70,15 @@ export default function TradingDashboard() {
     const pnl = trades.filter((trade) => trade.symbol === symbol).reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
     return { asset, invested, pnl };
   }), [settings.quote_asset, trades]);
+
+  const availableCapital = useMemo(() => {
+    const match = lastEvent?.message.match(/(?:^|;)available=([0-9.]+)/);
+    const value = match ? Number(match[1]) : Number.NaN;
+    return Number.isFinite(value) ? value : Number(settings.trade_cap_usdc);
+  }, [lastEvent, settings.trade_cap_usdc]);
+
   const serverOnline = lastEvent ? Date.now() - new Date(lastEvent.created_at).getTime() < 900_000 : false;
+  const maxOrderSize = Math.max(5, availableCapital);
 
   function update<K extends keyof Settings>(key: K, value: Settings[K]) { setSettings((current) => ({ ...current, [key]: value })); }
 
@@ -78,14 +86,22 @@ export default function TradingDashboard() {
     setSaving(true); setMessage("");
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) { setSaving(false); return; }
-    const safe = { ...settings, trade_cap_usdc: Math.min(100, Math.max(5, Number(settings.trade_cap_usdc))), order_size_usdc: Math.min(Number(settings.trade_cap_usdc), Math.max(5, Number(settings.order_size_usdc))), updated_at: new Date().toISOString(), user_id: userData.user.id };
+    const effectiveCapital = Math.max(5, availableCapital);
+    const safe = {
+      ...settings,
+      trade_cap_usdc: effectiveCapital,
+      order_size_usdc: Math.min(effectiveCapital, Math.max(5, Number(settings.order_size_usdc))),
+      max_daily_loss_usdc: Math.min(effectiveCapital, Math.max(0.5, Number(settings.max_daily_loss_usdc))),
+      updated_at: new Date().toISOString(),
+      user_id: userData.user.id,
+    };
     const { error } = await supabase.from("bot_settings").upsert(safe, { onConflict: "user_id" });
     setSaving(false); setMessage(error ? error.message : "Innstillingene er lagret."); if (!error) setSettings(safe);
   }
 
   async function setLive(enabled: boolean) {
     setSaving(true); setMessage("");
-    const next = { ...settings, bot_enabled: enabled, live_trading_enabled: enabled };
+    const next = { ...settings, trade_cap_usdc: Math.max(5, availableCapital), bot_enabled: enabled, live_trading_enabled: enabled };
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) { setSaving(false); return; }
     const { error } = await supabase.from("bot_settings").upsert({ ...next, user_id: userData.user.id, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
@@ -127,7 +143,7 @@ export default function TradingDashboard() {
     } else if (normalized.includes("hvorfor") || normalized.includes("signal") || normalized.includes("analyse")) {
       reply = lastEvent?.message ? `Siste analyse fra serveren: ${lastEvent.message}` : "Jeg har ikke mottatt et analysesignal fra serveren ennå.";
     } else if (normalized.includes("status") || normalized.includes("live") || normalized.includes("aktiv")) {
-      reply = `${serverOnline ? "Serveren er online" : "Serverstatusen er ikke fersk"}. Trading er ${settings.live_trading_enabled ? "LIVE" : "PAUSET"}. Handelsrammen er ${money(settings.trade_cap_usdc)} USDC, og ordrestørrelsen er ${money(settings.order_size_usdc)} USDC.`;
+      reply = `${serverOnline ? "Serveren er online" : "Serverstatusen er ikke fersk"}. Trading er ${settings.live_trading_enabled ? "LIVE" : "PAUSET"}. Tilgjengelig kapital er ${money(availableCapital)} ${settings.quote_asset}, og ordrestørrelsen er ${money(settings.order_size_usdc)} ${settings.quote_asset}.`;
     } else {
       reply = "Jeg kan svare om status, resultat, siste handel og siste analyse. Jeg kan også pause botten. Direkte kjøp/salg fra chat er sperret.";
     }
@@ -136,9 +152,9 @@ export default function TradingDashboard() {
 
   return <main className="shell">
     <header className="topbar"><div><span className="eyebrow">AI TRADING APP</span><h1>Kontrollpanel</h1></div><span className="pill"><i /> {serverOnline ? "Server online" : "Ingen fersk serverstatus"}</span></header>
-    <section className="hero"><div><p className="eyebrow">BEGRENSET LIVE-RAMME</p><h2>100 USDC. Spot-only. Harde tapsgrenser.</h2><p className="muted">Binance-uttak, futures og giring er deaktivert.</p></div><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button></section>
+    <section className="hero"><div><p className="eyebrow">LIVE SPOT-TRADING</p><h2>Tilgjengelig saldo. Spot-only. Harde tapsgrenser.</h2><p className="muted">Binance-uttak, futures og giring er deaktivert.</p></div><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button></section>
     <section className="grid metrics">
-      <article><span className="label">Handelsramme</span><strong>{money(settings.trade_cap_usdc)} USDC</strong><small>Resten av saldoen er utenfor boten</small></article>
+      <article><span className="label">Tilgjengelig kapital</span><strong>{money(availableCapital)} {settings.quote_asset}</strong><small>Fri saldo tilgjengelig for boten</small></article>
       <article><span className="label">Totalt resultat</span><strong className={stats.total < 0 ? "loss" : "gain"}>{money(stats.total)} USDC</strong><small>Realisert gevinst/tap</small></article>
       <article><span className="label">Vunnet</span><strong className="gain">{money(stats.won)} USDC</strong><small>Sum lønnsomme handler</small></article>
       <article><span className="label">Tapt</span><strong className="loss">{money(Math.abs(stats.lost))} USDC</strong><small>Sum tapte handler</small></article>
@@ -147,16 +163,16 @@ export default function TradingDashboard() {
     </section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">RISIKOKONTROLL</p><h3>Handelsinnstillinger</h3></div><span className={settings.live_trading_enabled ? "status-live" : "status-paused"}>{settings.live_trading_enabled ? "LIVE" : "PAUSET"}</span></div>
       <div className="form-grid">
-        <Field label="Maks kapital (USDC)" value={settings.trade_cap_usdc} min={5} max={100} step={5} onChange={(value) => update("trade_cap_usdc", value)} />
-        <Field label="Ordrestørrelse (USDC)" value={settings.order_size_usdc} min={5} max={settings.trade_cap_usdc} step={5} onChange={(value) => update("order_size_usdc", value)} />
+        <label className="number-field"><span>Tilgjengelig kapital ({settings.quote_asset})</span><input type="number" value={availableCapital} readOnly /></label>
+        <Field label={`Ordrestørrelse (${settings.quote_asset})`} value={settings.order_size_usdc} min={5} max={maxOrderSize} step={5} onChange={(value) => update("order_size_usdc", value)} />
         <Field label="Stop-loss (%)" value={settings.stop_loss_percent} min={0.25} max={10} step={0.25} onChange={(value) => update("stop_loss_percent", value)} />
         <Field label="Gevinstmål (%)" value={settings.take_profit_percent} min={0.5} max={25} step={0.5} onChange={(value) => update("take_profit_percent", value)} />
-        <Field label="Maks dagstap (USDC)" value={settings.max_daily_loss_usdc} min={0.5} max={settings.trade_cap_usdc} step={0.5} onChange={(value) => update("max_daily_loss_usdc", value)} />
+        <Field label={`Maks dagstap (${settings.quote_asset})`} value={settings.max_daily_loss_usdc} min={0.5} max={Math.max(0.5, availableCapital)} step={0.5} onChange={(value) => update("max_daily_loss_usdc", value)} />
         <label className="select-field"><span>Risikonivå</span><select value={settings.risk_profile} onChange={(event) => update("risk_profile", event.target.value as Settings["risk_profile"])}><option value="low">Lav</option><option value="normal">Normal</option><option value="high">Høy</option></select></label>
       </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button></div>{message && <p className="inline-message">{message}</p>}
     </section>
-    <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">Historikk fra boten</span></div><div className="assets">{allocations.map(({ asset, invested, pnl }) => <div className="asset" key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b><small>Investert: {money(invested)} USDC</small></div><span className={pnl < 0 ? "loss" : "gain"}>{money(pnl)} USDC</span></div>)}</div></section>
-    <section className="panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><span className="muted">Oppdateres hvert 30. sekund</span></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list">{trades.slice(0, 10).map((trade) => <div className="trade-row" key={trade.id}><b>{trade.side} {trade.symbol}</b><span>{Number(trade.quantity).toPrecision(6)}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{money(Number(trade.pnl ?? 0))} USDC</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>)}</div>}</section>
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">Historikk fra boten</span></div><div className="assets">{allocations.map(({ asset, invested, pnl }) => <div className="asset" key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b><small>Investert: {money(invested)} {settings.quote_asset}</small></div><span className={pnl < 0 ? "loss" : "gain"}>{money(pnl)} {settings.quote_asset}</span></div>)}</div></section>
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><span className="muted">Oppdateres hvert 30. sekund</span></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list">{trades.slice(0, 10).map((trade) => <div className="trade-row" key={trade.id}><b>{trade.side} {trade.symbol}</b><span>{Number(trade.quantity).toPrecision(6)}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{money(Number(trade.pnl ?? 0))} {settings.quote_asset}</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>)}</div>}</section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">SERVERSTATUS</p><h3>Siste kontrollsignal</h3></div>{lastEvent && <time className="muted">{new Date(lastEvent.created_at).toLocaleString("nb-NO")}</time>}</div><p className={lastEvent?.level === "error" ? "loss" : "muted"}>{lastEvent?.message ?? "Serverrapportering er ikke koblet til ennå."}</p></section>
     <section className="panel chat-panel"><div className="panel-head"><div><p className="eyebrow">SNAKK MED BOTTEN</p><h3>Du er sjefen</h3></div><span className="muted">Leser ferske kontrolldata</span></div>
       <div className="chat-log" aria-live="polite">{chatMessages.map((item) => <div className={`chat-bubble ${item.role}`} key={item.id}><small>{item.role === "boss" ? "SJEFEN" : "BOTTEN"}</small><p>{item.text}</p></div>)}</div>
