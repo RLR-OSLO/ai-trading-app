@@ -28,6 +28,8 @@ class Position:
     entry_price: str
     quote_spent: str
     opened_at: int
+    protective_order_list_id: int | None = None
+    protective_order_ids: tuple[int, ...] = ()
 
 
 @dataclass
@@ -118,11 +120,23 @@ def _today() -> str:
     return datetime.now(UTC).date().isoformat()
 
 
+def _position_from_raw(raw: dict[str, Any]) -> Position:
+    return Position(
+        symbol=raw["symbol"],
+        quantity=raw["quantity"],
+        entry_price=raw["entry_price"],
+        quote_spent=raw["quote_spent"],
+        opened_at=int(raw["opened_at"]),
+        protective_order_list_id=raw.get("protective_order_list_id"),
+        protective_order_ids=tuple(int(item) for item in raw.get("protective_order_ids", [])),
+    )
+
+
 def load_state(path: Path) -> LiveState:
     if not path.exists():
         return LiveState(day=_today())
     raw = json.loads(path.read_text(encoding="utf-8"))
-    position = Position(**raw["position"]) if raw.get("position") else None
+    position = _position_from_raw(raw["position"]) if raw.get("position") else None
     state = LiveState(
         day=raw["day"],
         realized_pnl=raw.get("realized_pnl", "0"),
@@ -162,11 +176,23 @@ def _net_acquired(order: dict, base_asset: str) -> Decimal:
     return max(quantity, Decimal("0"))
 
 
-def _sellable_quantity(client: BinanceSpotClient, symbol: str, quantity: Decimal) -> Decimal:
+def _symbol_filters(client: BinanceSpotClient, symbol: str) -> tuple[dict[str, Any], dict[str, Any]]:
     info = client.symbol_info(symbol)
     lot = next(item for item in info.get("filters", []) if item.get("filterType") == "LOT_SIZE")
+    price = next(item for item in info.get("filters", []) if item.get("filterType") == "PRICE_FILTER")
+    return lot, price
+
+
+def _sellable_quantity(client: BinanceSpotClient, symbol: str, quantity: Decimal) -> Decimal:
+    lot, _ = _symbol_filters(client, symbol)
     step = Decimal(str(lot["stepSize"]))
     return (quantity / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+
+def _price_for_tick(client: BinanceSpotClient, symbol: str, price: Decimal) -> Decimal:
+    _, price_filter = _symbol_filters(client, symbol)
+    tick = Decimal(str(price_filter["tickSize"]))
+    return (price / tick).to_integral_value(rounding=ROUND_DOWN) * tick
 
 
 def _clear_pending(state: LiveState) -> None:
@@ -177,6 +203,119 @@ def _clear_pending(state: LiveState) -> None:
 
 def _new_client_order_id(side: str, now: int) -> str:
     return f"ait-{side.lower()}-{now}"
+
+
+def _finalize_sell(
+    state: LiveState,
+    state_path: Path,
+    position: Position,
+    quantity: Decimal,
+    received: Decimal,
+    limits: LiveLimits,
+    report_trade: Callable[[dict[str, Any]], None] | None,
+) -> str:
+    if quantity <= 0 or received <= 0:
+        raise BinanceError("Sell execution returned invalid quantity or proceeds")
+    pnl = received - Decimal(position.quote_spent)
+    state.realized_pnl = str(Decimal(state.realized_pnl) + pnl)
+    state.position = None
+    _clear_pending(state)
+    state.trades_today += 1
+    state.cooldown_until = int(time.time()) + limits.cooldown_seconds
+    save_state(state_path, state)
+    if report_trade:
+        report_trade({
+            "symbol": position.symbol,
+            "side": "SELL",
+            "quantity": str(quantity),
+            "entry_price": position.entry_price,
+            "exit_price": str(received / quantity),
+            "pnl": str(pnl),
+        })
+    return f"sold:{position.symbol}:pnl={pnl}"
+
+
+def _exchange_protection_enabled() -> bool:
+    return os.getenv("EXCHANGE_PROTECTION_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _install_exchange_protection(
+    client: BinanceSpotClient,
+    state: LiveState,
+    state_path: Path,
+    position: Position,
+    stop: Decimal,
+    target: Decimal,
+) -> str:
+    quantity = _sellable_quantity(client, position.symbol, Decimal(position.quantity))
+    if quantity <= 0:
+        raise BinanceError("No sellable quantity available for protective OCO")
+    stop_price = _price_for_tick(client, position.symbol, stop)
+    target_price = _price_for_tick(client, position.symbol, target)
+    list_client_order_id = f"ait-oco-{int(time.time())}"
+    response = client.place_protective_oco_sell(
+        symbol=position.symbol,
+        quantity=quantity,
+        target_price=target_price,
+        stop_price=stop_price,
+        live_trading_enabled=True,
+        list_client_order_id=list_client_order_id,
+    )
+    order_list_id = response.get("orderListId")
+    orders = response.get("orders", [])
+    if order_list_id is None or len(orders) != 2:
+        raise BinanceError("Protective OCO returned an incomplete response")
+    position.protective_order_list_id = int(order_list_id)
+    position.protective_order_ids = tuple(int(item["orderId"]) for item in orders)
+    save_state(state_path, state)
+    return f"protected:{position.symbol}:oco={order_list_id}"
+
+
+def _check_exchange_protection(
+    client: BinanceSpotClient,
+    state: LiveState,
+    state_path: Path,
+    position: Position,
+    limits: LiveLimits,
+    report_trade: Callable[[dict[str, Any]], None] | None,
+) -> str | None:
+    if position.protective_order_list_id is None:
+        return None
+    try:
+        order_list = client.query_order_list(order_list_id=position.protective_order_list_id)
+    except BinanceError:
+        # Fail closed: if we cannot verify the OCO, assume Binance still owns the
+        # protection and do not submit a duplicate market sell.
+        return f"protected_status_unavailable:{position.symbol}"
+
+    list_status = str(order_list.get("listOrderStatus", ""))
+    if list_status == "EXECUTING":
+        return f"protected:{position.symbol}:oco={position.protective_order_list_id}"
+
+    order_ids = position.protective_order_ids or tuple(
+        int(item["orderId"]) for item in order_list.get("orders", []) if item.get("orderId") is not None
+    )
+    filled_orders: list[dict[str, Any]] = []
+    for order_id in order_ids:
+        try:
+            order = client.query_order_by_id(symbol=position.symbol, order_id=order_id)
+        except BinanceError:
+            continue
+        if order.get("status") == "FILLED":
+            filled_orders.append(order)
+
+    if filled_orders:
+        filled = max(filled_orders, key=lambda item: Decimal(str(item.get("cummulativeQuoteQty", "0"))))
+        quantity = Decimal(str(filled.get("executedQty", "0")))
+        received = Decimal(str(filled.get("cummulativeQuoteQty", "0")))
+        return _finalize_sell(state, state_path, position, quantity, received, limits, report_trade)
+
+    # The OCO ended without a fill (for example manual cancellation). Clear its
+    # marker so the next cycle reinstalls protection while the position remains.
+    position.protective_order_list_id = None
+    position.protective_order_ids = ()
+    save_state(state_path, state)
+    return None
 
 
 def _reconcile_pending(
@@ -196,9 +335,6 @@ def _reconcile_pending(
     try:
         order = client.query_order(symbol=symbol, orig_client_order_id=state.pending_client_order_id)
     except BinanceError as exc:
-        # If Binance confirms that no such order exists, the crash happened before
-        # submission. Clear the stale marker after a short grace period and retry
-        # normally on the next cycle. Other errors remain fail-closed.
         if "-2013" in str(exc) and state.pending_since and int(time.time()) - state.pending_since >= 60:
             _clear_pending(state)
             save_state(state_path, state)
@@ -233,17 +369,7 @@ def _reconcile_pending(
         return f"reconciled_buy:{symbol}"
 
     if side == "SELL" and state.position:
-        position = state.position
-        pnl = quote_qty - Decimal(position.quote_spent)
-        state.realized_pnl = str(Decimal(state.realized_pnl) + pnl)
-        state.position = None
-        state.trades_today += 1
-        state.cooldown_until = now + limits.cooldown_seconds
-        _clear_pending(state)
-        save_state(state_path, state)
-        if report_trade:
-            report_trade({"symbol": symbol, "side": "SELL", "quantity": str(executed), "entry_price": position.entry_price, "exit_price": str(quote_qty / executed) if executed else None, "pnl": str(pnl)})
-        return f"reconciled_sell:{symbol}:pnl={pnl}"
+        return _finalize_sell(state, state_path, state.position, executed, quote_qty, limits, report_trade)
 
     return f"paused_pending_reconciliation:{state.pending_action}"
 
@@ -267,16 +393,28 @@ def run_live_cycle(
     if reconciled:
         return reconciled
 
-    # Existing positions are always managed, even when new entries are paused
-    # or the daily loss limit has been reached.
     if state.position:
         position = state.position
+        protected_result = _check_exchange_protection(client, state, state_path, position, limits, report_trade)
+        if protected_result:
+            return protected_result
+
         current = client.ticker_price(position.symbol)
         entry = Decimal(position.entry_price)
         stop = entry * (Decimal("1") - limits.stop_fraction)
         target = entry * (Decimal("1") + limits.target_fraction)
+
+        if stop < current < target and _exchange_protection_enabled():
+            try:
+                return _install_exchange_protection(client, state, state_path, position, stop, target)
+            except BinanceError:
+                # Keep server-side monitoring as a fallback if Binance rejects or
+                # temporarily cannot accept the OCO.
+                return f"holding_unprotected:{position.symbol}"
+
         if stop < current < target:
             return f"holding:{position.symbol}"
+
         quantity = _sellable_quantity(client, position.symbol, Decimal(position.quantity))
         if quantity <= 0:
             raise BinanceError("No sellable quantity remains for the open position")
@@ -294,23 +432,7 @@ def run_live_cycle(
             client_order_id=client_order_id,
         )
         received = Decimal(str(order.get("cummulativeQuoteQty", "0")))
-        pnl = received - Decimal(position.quote_spent)
-        state.realized_pnl = str(realized + pnl)
-        state.position = None
-        _clear_pending(state)
-        state.trades_today += 1
-        state.cooldown_until = now + limits.cooldown_seconds
-        save_state(state_path, state)
-        if report_trade:
-            report_trade({
-                "symbol": position.symbol,
-                "side": "SELL",
-                "quantity": str(quantity),
-                "entry_price": position.entry_price,
-                "exit_price": str(received / quantity),
-                "pnl": str(pnl),
-            })
-        return f"sold:{position.symbol}:pnl={pnl}"
+        return _finalize_sell(state, state_path, position, quantity, received, limits, report_trade)
 
     if not allow_new_entries:
         return "paused_new_entries"
@@ -369,4 +491,15 @@ def run_live_cycle(
             "exit_price": None,
             "pnl": None,
         })
+
+    if _exchange_protection_enabled():
+        entry = Decimal(state.position.entry_price)
+        stop = entry * (Decimal("1") - limits.stop_fraction)
+        target = entry * (Decimal("1") + limits.target_fraction)
+        try:
+            protection = _install_exchange_protection(client, state, state_path, state.position, stop, target)
+            return f"bought:{symbol}:spent={spent};{protection}"
+        except BinanceError:
+            return f"bought:{symbol}:spent={spent};protection=pending"
+
     return f"bought:{symbol}:spent={spent}"
