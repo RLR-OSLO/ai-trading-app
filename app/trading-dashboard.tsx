@@ -20,6 +20,11 @@ type BotEvent = { id: number; level: "info" | "warning" | "error"; event_type: s
 type ChatMessage = { id: number; role: "boss" | "bot"; text: string };
 
 const defaults: Settings = { bot_enabled: false, live_trading_enabled: false, risk_profile: "normal", quote_asset: "USDC", trade_cap_usdc: 100, order_size_usdc: 25, stop_loss_percent: 1, take_profit_percent: 2, max_daily_loss_usdc: 2 };
+const MARKET_UNIVERSE = [
+  "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LINK",
+  "SUI", "XLM", "BCH", "LTC", "DOT", "SHIB", "TON", "HBAR", "UNI", "AAVE",
+  "NEAR", "APT", "ETC", "FIL", "ICP", "ATOM", "ALGO", "VET", "POL", "ARB",
+] as const;
 const money = (value: number) => new Intl.NumberFormat("nb-NO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
 const crypto = (value: number) => new Intl.NumberFormat("nb-NO", { maximumFractionDigits: 8 }).format(value);
 
@@ -40,7 +45,7 @@ export default function TradingDashboard() {
     if (!userData.user) return;
     const [{ data: row, error }, { data: recent }, { data: events }] = await Promise.all([
       supabase.from("bot_settings").select("bot_enabled,live_trading_enabled,risk_profile,quote_asset,trade_cap_usdc,order_size_usdc,stop_loss_percent,take_profit_percent,max_daily_loss_usdc").eq("user_id", userData.user.id).maybeSingle(),
-      supabase.from("trades").select("id,symbol,mode,side,quantity,entry_price,exit_price,pnl,created_at").order("created_at", { ascending: false }).limit(100),
+      supabase.from("trades").select("id,symbol,mode,side,quantity,entry_price,exit_price,pnl,created_at").order("created_at", { ascending: false }).limit(500),
       supabase.from("bot_events").select("id,level,event_type,message,created_at").order("created_at", { ascending: false }).limit(1),
     ]);
     if (error) setMessage(error.message);
@@ -75,10 +80,10 @@ export default function TradingDashboard() {
 
   const assets = useMemo(() => {
     const suffix = settings.quote_asset;
-    const names = new Set<string>();
+    const names = new Set<string>(MARKET_UNIVERSE);
     for (const symbol of marketPrices.keys()) if (symbol.endsWith(suffix)) names.add(symbol.slice(0, -suffix.length));
     for (const trade of trades) if (trade.symbol.endsWith(suffix)) names.add(trade.symbol.slice(0, -suffix.length));
-    return Array.from(names).slice(0, 20);
+    return Array.from(names);
   }, [marketPrices, settings.quote_asset, trades]);
 
   const allocations = useMemo(() => assets.map((asset) => {
@@ -93,8 +98,8 @@ export default function TradingDashboard() {
     const currentPrice = marketPrices.get(symbol) ?? null;
     const currentValue = currentPrice === null ? null : quantity * currentPrice;
     const unrealized = currentValue === null ? null : currentValue - invested;
-    return { asset, invested, quantity, pnl, currentPrice, currentValue, unrealized };
-  }), [assets, settings.quote_asset, trades, marketPrices]);
+    return { asset, invested, quantity, pnl, currentPrice, currentValue, unrealized, owned: quantity > 0.000000001 };
+  }).sort((a, b) => Number(b.owned) - Number(a.owned) || MARKET_UNIVERSE.indexOf(a.asset as typeof MARKET_UNIVERSE[number]) - MARKET_UNIVERSE.indexOf(b.asset as typeof MARKET_UNIVERSE[number])), [assets, settings.quote_asset, trades, marketPrices]);
 
   const availableCapital = useMemo(() => {
     const match = lastEvent?.message.match(/(?:^|;)available=([0-9.]+)/);
@@ -173,7 +178,7 @@ export default function TradingDashboard() {
         <label className="select-field"><span>Risikonivå</span><select value={settings.risk_profile} onChange={(event) => update("risk_profile", event.target.value as Settings["risk_profile"])}><option value="low">Lav</option><option value="normal">Normal</option><option value="high">Høy</option></select></label>
       </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button></div>{message && <p className="inline-message">{message}</p>}
     </section>
-    <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">20 mest omsatte godkjente markeder · oppdateres ca. hvert 30. sekund</span></div><div className="assets">{allocations.map(({ asset, invested, quantity, pnl, currentPrice, currentValue, unrealized }) => <div className="asset" key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b><small>Investert: {money(invested)} {settings.quote_asset} · Eier: {crypto(quantity)} {asset}</small><small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`} · Verdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`}</small></div><span className={(unrealized ?? pnl) < 0 ? "loss" : "gain"}>{unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>)}</div></section>
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">Alle godkjente markeder · investerte posisjoner vises først</span></div><div className="assets">{allocations.map(({ asset, invested, quantity, pnl, currentPrice, currentValue, unrealized, owned }) => <div className={`asset${owned ? " invested" : ""}`} key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b>{owned && <span className="owned-badge">INVESTERT</span>}<small>Investert: {money(invested)} {settings.quote_asset} · Eier: {crypto(quantity)} {asset}</small><small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`} · Verdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`}</small></div><span className={(unrealized ?? pnl) < 0 ? "loss" : "gain"}>{unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>)}</div></section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><span className="muted">Oppdateres hvert 30. sekund</span></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list">{trades.slice(0, 20).map((trade) => <div className="trade-row" key={trade.id}><b>{trade.side} {trade.symbol}</b><span>{Number(trade.quantity).toPrecision(6)}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{money(Number(trade.pnl ?? 0))} {settings.quote_asset}</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>)}</div>}</section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">SERVERSTATUS</p><h3>Siste kontrollsignal</h3></div>{lastEvent && <time className="muted">{new Date(lastEvent.created_at).toLocaleString("nb-NO")}</time>}</div><p className={lastEvent?.level === "error" ? "loss" : "muted"}>{lastEvent?.message ?? "Serverrapportering er ikke koblet til ennå."}</p></section>
     <section className="panel chat-panel"><div className="panel-head"><div><p className="eyebrow">SNAKK MED BOTTEN</p><h3>Du er sjefen</h3></div><span className="muted">Leser ferske kontrolldata</span></div>
