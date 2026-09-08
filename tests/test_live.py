@@ -1,9 +1,7 @@
-import os
 import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import patch
 
 from trader.live import LiveLimits, LiveState, Position, load_state, run_live_cycle, save_state
 
@@ -68,14 +66,17 @@ class LiveTradingTests(unittest.TestCase):
     def limits(self):
         return LiveLimits(Decimal("100"), Decimal("25"), Decimal("0.01"), Decimal("0.02"), Decimal("2"), 6, 1800)
 
-    def test_absolute_cap_cannot_exceed_100(self):
-        with patch.dict(os.environ, {"LIVE_CAP_USDC": "101"}, clear=False):
-            with self.assertRaisesRegex(ValueError, "absolute 100"):
-                LiveLimits.from_env()
+    def test_available_capital_can_exceed_100(self):
+        limits = LiveLimits.from_values("293", "25", "1", "2", "2", max_trades=8, cooldown=900)
+        self.assertEqual(limits.capital_cap, Decimal("293"))
 
-    def test_dashboard_settings_use_same_hard_cap(self):
+    def test_order_size_cannot_exceed_available_capital(self):
+        with self.assertRaisesRegex(ValueError, "available trading capital"):
+            LiveLimits.from_values("20", "25", "1", "2", "2", max_trades=8, cooldown=900)
+
+    def test_dashboard_settings_use_available_capital(self):
         settings = {
-            "trade_cap_usdc": 100,
+            "trade_cap_usdc": 293,
             "order_size_usdc": 20,
             "stop_loss_percent": 1.5,
             "take_profit_percent": 3,
@@ -83,7 +84,7 @@ class LiveTradingTests(unittest.TestCase):
             "risk_profile": "high",
         }
         limits = LiveLimits.from_settings(settings)
-        self.assertEqual(limits.capital_cap, Decimal("100"))
+        self.assertEqual(limits.capital_cap, Decimal("293"))
         self.assertEqual(limits.order_size, Decimal("20"))
         self.assertEqual(limits.max_trades_per_day, 12)
         self.assertEqual(limits.cooldown_seconds, 300)

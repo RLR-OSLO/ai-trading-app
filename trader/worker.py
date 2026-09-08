@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from decimal import Decimal
 from pathlib import Path
 
 from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
@@ -58,6 +59,13 @@ def readiness_check(client: BinanceSpotClient, pairs: tuple[str, ...] | None = N
     return False
 
 
+def free_quote_balance(client: BinanceSpotClient, quote_asset: str) -> Decimal:
+    for balance in client.account().get("balances", []):
+        if balance.get("asset") == quote_asset:
+            return Decimal(str(balance.get("free", "0")))
+    return Decimal("0")
+
+
 def market_scan(
     client: BinanceSpotClient,
     news_monitor: NewsMonitor,
@@ -106,7 +114,13 @@ def main() -> None:
             risk_profile = str((settings or {}).get("risk_profile") or "normal").lower()
             pairs = configured_pairs(quote_asset)
             authenticated = readiness_check(client, pairs)
-            LOG.info("health check passed; authenticated_account_read=%s", authenticated)
+            available_balance = free_quote_balance(client, quote_asset) if authenticated else Decimal("0")
+            LOG.info(
+                "health check passed; authenticated_account_read=%s; available_%s=%s",
+                authenticated,
+                quote_asset.lower(),
+                available_balance,
+            )
 
             signals, analyses, context = market_scan(client, news_monitor, pairs, risk_profile)
             signal_text = ",".join(pair for pair, signal in signals.items() if signal) or "none"
@@ -124,16 +138,19 @@ def main() -> None:
                 best = analyses[best_pair]
                 reporter.record_event(
                     "heartbeat",
-                    f"live={allow_new_entries};{context};signals={signal_text};scores={score_text};"
-                    f"best={best_pair}:{best.score};reasons={','.join(best.reasons)}",
+                    f"live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
+                    f"signals={signal_text};scores={score_text};best={best_pair}:{best.score};"
+                    f"reasons={','.join(best.reasons)}",
                 )
                 last_heartbeat = time.time()
 
+            runtime_settings = dict(settings or {})
+            runtime_settings["trade_cap_usdc"] = str(max(available_balance, Decimal("5")))
             result = run_live_cycle(
                 client,
                 signals,
                 state_path,
-                LiveLimits.from_settings(settings) if settings else LiveLimits.from_env(),
+                LiveLimits.from_settings(runtime_settings) if settings else LiveLimits.from_env(),
                 reporter.record_trade if reporter else None,
                 allow_new_entries=allow_new_entries,
                 quote_asset=quote_asset,

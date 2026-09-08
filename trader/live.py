@@ -13,7 +13,6 @@ from typing import Any, Callable
 from .binance import BinanceError, BinanceSpotClient
 
 
-ABSOLUTE_CAP_USDC = Decimal("100")
 PROFILE_LIMITS = {
     "low": (6, 1800),
     "normal": (8, 900),
@@ -99,10 +98,10 @@ class LiveLimits:
         daily_loss = Decimal(str(daily_loss_value))
         max_trades = max_trades if max_trades is not None else int(os.getenv("LIVE_MAX_TRADES_PER_DAY", "8"))
         cooldown = cooldown if cooldown is not None else int(os.getenv("LIVE_COOLDOWN_SECONDS", "900"))
-        if not (Decimal("5") <= cap <= ABSOLUTE_CAP_USDC):
-            raise ValueError("LIVE_CAP_USDC must be between 5 and the absolute 100 USDC cap")
+        if cap < Decimal("5"):
+            raise ValueError("Available trading capital must be at least 5 quote units")
         if not (Decimal("5") <= order <= cap):
-            raise ValueError("LIVE_ORDER_USDC must be between 5 and LIVE_CAP_USDC")
+            raise ValueError("LIVE_ORDER_USDC must be between 5 and available trading capital")
         if not (Decimal("0.0025") <= stop <= Decimal("0.10")):
             raise ValueError("LIVE_STOP_PERCENT is outside the safety range")
         if not (Decimal("0.005") <= target <= Decimal("0.25")):
@@ -284,8 +283,6 @@ def _check_exchange_protection(
     try:
         order_list = client.query_order_list(order_list_id=position.protective_order_list_id)
     except BinanceError:
-        # Fail closed: if we cannot verify the OCO, assume Binance still owns the
-        # protection and do not submit a duplicate market sell.
         return f"protected_status_unavailable:{position.symbol}"
 
     list_status = str(order_list.get("listOrderStatus", ""))
@@ -310,8 +307,6 @@ def _check_exchange_protection(
         received = Decimal(str(filled.get("cummulativeQuoteQty", "0")))
         return _finalize_sell(state, state_path, position, quantity, received, limits, report_trade)
 
-    # The OCO ended without a fill (for example manual cancellation). Clear its
-    # marker so the next cycle reinstalls protection while the position remains.
     position.protective_order_list_id = None
     position.protective_order_ids = ()
     save_state(state_path, state)
@@ -408,8 +403,6 @@ def run_live_cycle(
             try:
                 return _install_exchange_protection(client, state, state_path, position, stop, target)
             except BinanceError:
-                # Keep server-side monitoring as a fallback if Binance rejects or
-                # temporarily cannot accept the OCO.
                 return f"holding_unprotected:{position.symbol}"
 
         if stop < current < target:
