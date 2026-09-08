@@ -21,8 +21,9 @@ class TradingConfig:
 DEFAULT_CONFIG = TradingConfig(
     starting_capital_nok=Decimal("6000"),
     symbols=(
-        "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "LINK", "DOT",
-        "LTC", "BCH", "TRX", "SUI", "TON", "NEAR", "APT", "UNI", "XLM", "ETC",
+        "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LINK",
+        "SUI", "XLM", "BCH", "LTC", "DOT", "SHIB", "TON", "HBAR", "UNI", "AAVE",
+        "NEAR", "APT", "ETC", "FIL", "ICP", "ATOM", "ALGO", "VET", "POL", "ARB",
     ),
     preferred_quote_assets=("USDC", "USDT"),
     risk_per_trade=Decimal("0.005"),
