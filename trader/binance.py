@@ -117,6 +117,14 @@ class BinanceSpotClient:
             raise BinanceError(f"Symbol unavailable: {symbol}")
         return symbols[0]
 
+    def query_order(self, *, symbol: str, orig_client_order_id: str) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            "/api/v3/order",
+            {"symbol": symbol, "origClientOrderId": orig_client_order_id},
+            signed=True,
+        )
+
     def test_market_buy(self, *, symbol: str, quote_quantity: Decimal) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -125,15 +133,26 @@ class BinanceSpotClient:
             signed=True,
         )
 
-    def market_buy_by_quote(self, *, symbol: str, quote_quantity: Decimal, live_trading_enabled: bool) -> dict[str, Any]:
+    def market_buy_by_quote(
+        self,
+        *,
+        symbol: str,
+        quote_quantity: Decimal,
+        live_trading_enabled: bool,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any]:
         if not live_trading_enabled:
             raise BinanceError("Live trading safety lock is disabled")
-        return self._request(
-            "POST",
-            "/api/v3/order",
-            {"symbol": symbol, "side": "BUY", "type": "MARKET", "quoteOrderQty": format(quote_quantity, "f"), "newOrderRespType": "FULL"},
-            signed=True,
-        )
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "side": "BUY",
+            "type": "MARKET",
+            "quoteOrderQty": format(quote_quantity, "f"),
+            "newOrderRespType": "FULL",
+        }
+        if client_order_id:
+            params["newClientOrderId"] = client_order_id
+        return self._request("POST", "/api/v3/order", params, signed=True)
 
     def place_spot_order(
         self,
@@ -143,6 +162,7 @@ class BinanceSpotClient:
         order_type: str,
         quantity: Decimal,
         live_trading_enabled: bool,
+        client_order_id: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not live_trading_enabled:
@@ -157,5 +177,7 @@ class BinanceSpotClient:
             "quantity": format(quantity, "f"),
             "newOrderRespType": "FULL",
         }
+        if client_order_id:
+            params["newClientOrderId"] = client_order_id
         params.update(extra or {})
         return self._request("POST", "/api/v3/order", params, signed=True)
