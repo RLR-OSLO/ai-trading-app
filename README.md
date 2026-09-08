@@ -18,6 +18,7 @@ Automated, long-only Binance Spot trading with deterministic risk controls.
 - Maximum open positions: 1
 - Risk-profile cadence: Low 6 actions/day + 30 min cooldown, Normal 8 + 15 min, High 12 + 5 min
 - Worker interval: 30 seconds
+- Exchange-side OCO protection enabled by default
 - Spot only: no leverage, futures, margin, shorting, or withdrawals
 
 ## Market analysis
@@ -34,15 +35,23 @@ itself.
 ## Runtime safety
 
 Pausing the dashboard stops new entries only. Any already-open position remains
-under stop-loss/take-profit monitoring so the bot can still exit it. Daily-loss
-and trade-count limits likewise block new entries, not emergency management of
-an existing position.
+protected and monitored. After a market buy, the engine attempts to place a
+Binance Spot OCO sell pair with a LIMIT_MAKER take-profit leg and STOP_LOSS leg,
+so protection can remain at the exchange even if the Linux worker is offline.
+The worker tracks the order list and records the realized exit when one leg
+fills. If OCO placement is temporarily unavailable, server-side stop/target
+monitoring remains as a fallback. Daily-loss and trade-count limits block new
+entries, not emergency management of an existing position.
+
+Interrupted BUY/SELL requests use deterministic Binance client order IDs. After
+a restart the worker queries Binance and reconciles an order that may have been
+submitted before the process stopped, instead of blindly sending a duplicate.
 
 ## Architecture
 
 - `trader/`: Python trading and risk engine running continuously on a fixed-IP
   server.
-- Binance Spot REST APIs for market data and orders.
+- Binance Spot REST APIs for market data, orders and OCO protection.
 - Next.js dashboard for configuration and reporting.
 - Supabase Auth and Postgres for users, TOTP MFA, settings, trades, events and
   row-isolated account data.
