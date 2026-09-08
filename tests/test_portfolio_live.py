@@ -14,6 +14,7 @@ class FakeClient:
         self.cancelled_oco = 0
         self.live_sells = 0
         self.price = Decimal("100")
+        self.last_oco_kwargs = None
 
     def account(self):
         return {"balances": [{"asset": "USDC", "free": "200", "locked": "0"}]}
@@ -34,8 +35,9 @@ class FakeClient:
             {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
         ]}
 
-    def place_protective_oco_sell(self, **_kwargs):
+    def place_protective_oco_sell(self, **kwargs):
         self.oco_orders += 1
+        self.last_oco_kwargs = kwargs
         base = 1000 + self.oco_orders * 10
         return {"orderListId": self.oco_orders, "orders": [{"orderId": base + 1}, {"orderId": base + 2}]}
 
@@ -73,6 +75,7 @@ class PortfolioLiveTests(unittest.TestCase):
         self.assertEqual(state.positions[0].symbol, "BNBUSDC")
         self.assertEqual(state.positions[0].strategy, "swing")
         self.assertEqual(state.positions[0].protective_order_list_id, 77)
+        self.assertFalse(state.positions[0].trailing_active)
 
     def test_can_hold_multiple_symbols_at_once(self):
         client = FakeClient()
@@ -109,6 +112,46 @@ class PortfolioLiveTests(unittest.TestCase):
         self.assertEqual(position.target_fraction, "0.0075")
         self.assertEqual(position.max_hold_seconds, 900)
         self.assertEqual(client.oco_orders, 1)
+
+    def test_target_becomes_trailing_activation_and_profit_can_run(self):
+        client = FakeClient()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            run_portfolio_cycle(client, {"BTCUSDC": True}, path, self.limits())
+            self.assertEqual(client.last_oco_kwargs["target_price"], Decimal("150.00"))
+            state = load_state(path)
+            state.cooldown_until = 0
+            save_state(path, state)
+            client.price = Decimal("110")
+            result = run_portfolio_cycle(client, {"BTCUSDC": False}, path, self.limits())
+            state = load_state(path)
+        position = state.positions[0]
+        self.assertIn("trailing_active:BTCUSDC", result)
+        self.assertTrue(position.trailing_active)
+        self.assertEqual(Decimal(position.peak_price), Decimal("110"))
+        self.assertEqual(Decimal(position.trailing_stop_price), Decimal("108.90"))
+        self.assertEqual(client.cancelled_oco, 1)
+        self.assertEqual(client.oco_orders, 2)
+        self.assertEqual(client.live_sells, 0)
+
+    def test_trailing_stop_rises_with_new_high(self):
+        client = FakeClient()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            run_portfolio_cycle(client, {"BTCUSDC": True}, path, self.limits())
+            state = load_state(path)
+            state.cooldown_until = 0
+            save_state(path, state)
+            client.price = Decimal("103")
+            run_portfolio_cycle(client, {"BTCUSDC": False}, path, self.limits())
+            client.price = Decimal("110")
+            result = run_portfolio_cycle(client, {"BTCUSDC": False}, path, self.limits())
+            state = load_state(path)
+        position = state.positions[0]
+        self.assertIn("trailing_raise:BTCUSDC", result)
+        self.assertEqual(Decimal(position.peak_price), Decimal("110"))
+        self.assertEqual(Decimal(position.trailing_stop_price), Decimal("108.90"))
+        self.assertGreaterEqual(client.cancelled_oco, 2)
 
     def test_expired_scalp_cancels_oco_before_market_exit(self):
         client = FakeClient()
