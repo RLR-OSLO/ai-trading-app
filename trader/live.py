@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
+from typing import Any, Callable
 
 from .binance import BinanceError, BinanceSpotClient
 
@@ -46,11 +47,31 @@ class LiveLimits:
 
     @classmethod
     def from_env(cls) -> "LiveLimits":
-        cap = Decimal(os.getenv("LIVE_CAP_USDC", "100"))
-        order = Decimal(os.getenv("LIVE_ORDER_USDC", "25"))
-        stop = Decimal(os.getenv("LIVE_STOP_PERCENT", "1")) / Decimal("100")
-        target = Decimal(os.getenv("LIVE_TARGET_PERCENT", "2")) / Decimal("100")
-        daily_loss = Decimal(os.getenv("LIVE_DAILY_LOSS_USDC", "2"))
+        return cls.from_values(
+            os.getenv("LIVE_CAP_USDC", "100"),
+            os.getenv("LIVE_ORDER_USDC", "25"),
+            os.getenv("LIVE_STOP_PERCENT", "1"),
+            os.getenv("LIVE_TARGET_PERCENT", "2"),
+            os.getenv("LIVE_DAILY_LOSS_USDC", "2"),
+        )
+
+    @classmethod
+    def from_settings(cls, settings: dict[str, Any]) -> "LiveLimits":
+        return cls.from_values(
+            settings.get("trade_cap_usdc", "100"),
+            settings.get("order_size_usdc", "25"),
+            settings.get("stop_loss_percent", "1"),
+            settings.get("take_profit_percent", "2"),
+            settings.get("max_daily_loss_usdc", "2"),
+        )
+
+    @classmethod
+    def from_values(cls, cap_value: Any, order_value: Any, stop_value: Any, target_value: Any, daily_loss_value: Any) -> "LiveLimits":
+        cap = Decimal(str(cap_value))
+        order = Decimal(str(order_value))
+        stop = Decimal(str(stop_value)) / Decimal("100")
+        target = Decimal(str(target_value)) / Decimal("100")
+        daily_loss = Decimal(str(daily_loss_value))
         max_trades = int(os.getenv("LIVE_MAX_TRADES_PER_DAY", "6"))
         cooldown = int(os.getenv("LIVE_COOLDOWN_SECONDS", "1800"))
         if not (Decimal("5") <= cap <= ABSOLUTE_CAP_USDC):
@@ -114,7 +135,13 @@ def _sellable_quantity(client: BinanceSpotClient, symbol: str, quantity: Decimal
     return (quantity / step).to_integral_value(rounding=ROUND_DOWN) * step
 
 
-def run_live_cycle(client: BinanceSpotClient, signals: dict[str, bool], state_path: Path, limits: LiveLimits) -> str:
+def run_live_cycle(
+    client: BinanceSpotClient,
+    signals: dict[str, bool],
+    state_path: Path,
+    limits: LiveLimits,
+    report_trade: Callable[[dict[str, Any]], None] | None = None,
+) -> str:
     state = load_state(state_path)
     now = int(time.time())
     realized = Decimal(state.realized_pnl)
@@ -143,6 +170,8 @@ def run_live_cycle(client: BinanceSpotClient, signals: dict[str, bool], state_pa
         state.trades_today += 1
         state.cooldown_until = now + limits.cooldown_seconds
         save_state(state_path, state)
+        if report_trade:
+            report_trade({"symbol": position.symbol, "side": "SELL", "quantity": str(quantity), "entry_price": position.entry_price, "exit_price": str(received / quantity), "pnl": str(pnl)})
         return f"sold:{position.symbol}:pnl={pnl}"
 
     if state.trades_today >= limits.max_trades_per_day:
@@ -170,4 +199,6 @@ def run_live_cycle(client: BinanceSpotClient, signals: dict[str, bool], state_pa
     state.pending_action = None
     state.trades_today += 1
     save_state(state_path, state)
+    if report_trade:
+        report_trade({"symbol": symbol, "side": "BUY", "quantity": str(net_quantity), "entry_price": str(spent / executed), "exit_price": None, "pnl": None})
     return f"bought:{symbol}:spent={spent}"

@@ -8,6 +8,7 @@ from pathlib import Path
 from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
 from .config import DEFAULT_CONFIG
 from .live import LiveLimits, run_live_cycle
+from .reporting import SupabaseReporter
 from .simulation import paper_signal_from_klines
 
 
@@ -69,10 +70,11 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     client = build_client()
-    live = _bool_env("LIVE_TRADING_ENABLED")
+    reporter = SupabaseReporter.from_env()
+    master_live = _bool_env("LIVE_TRADING_ENABLED")
     LOG.info(
         "worker starting; live_trading=%s; symbols=%s",
-        live,
+        master_live,
         ",".join(configured_pairs()),
     )
 
@@ -88,12 +90,20 @@ def main() -> None:
                 "paper scan; buy_signals=%s",
                 ",".join(pair for pair, signal in signals.items() if signal) or "none",
             )
+            settings = reporter.get_settings() if reporter else None
+            dashboard_live = settings is None or (
+                bool(settings.get("bot_enabled")) and bool(settings.get("live_trading_enabled"))
+            )
+            live = master_live and dashboard_live
+            if master_live and not live:
+                LOG.warning("live cycle paused by dashboard")
             if live:
                 result = run_live_cycle(
                     client,
                     signals,
                     Path(os.getenv("LIVE_STATE_PATH", "/var/lib/ai-trading-app/live-state.json")),
-                    LiveLimits.from_env(),
+                    LiveLimits.from_settings(settings) if settings else LiveLimits.from_env(),
+                    reporter.record_trade if reporter else None,
                 )
                 LOG.warning("live cycle result=%s", result)
         except Exception:

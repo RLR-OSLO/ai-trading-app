@@ -41,6 +41,12 @@ class LiveTradingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "absolute 100"):
                 LiveLimits.from_env()
 
+    def test_dashboard_settings_use_same_hard_cap(self):
+        settings = {"trade_cap_usdc": 100, "order_size_usdc": 20, "stop_loss_percent": 1.5, "take_profit_percent": 3, "max_daily_loss_usdc": 4}
+        limits = LiveLimits.from_settings(settings)
+        self.assertEqual(limits.capital_cap, Decimal("100"))
+        self.assertEqual(limits.order_size, Decimal("20"))
+
     def test_no_signal_never_places_order(self):
         client = FakeClient()
         with tempfile.TemporaryDirectory() as directory:
@@ -50,15 +56,18 @@ class LiveTradingTests(unittest.TestCase):
 
     def test_signal_runs_test_then_one_live_buy_and_persists_net_quantity(self):
         client = FakeClient()
+        reports = []
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
-            result = run_live_cycle(client, {"BTCUSDC": True}, path, self.limits())
+            result = run_live_cycle(client, {"BTCUSDC": True}, path, self.limits(), reports.append)
             state = load_state(path)
         self.assertEqual(result, "bought:BTCUSDC:spent=25")
         self.assertEqual(client.test_orders, 1)
         self.assertEqual(client.live_buys, 1)
         self.assertEqual(state.position.quantity, "0.00031644")
         self.assertIsNone(state.pending_action)
+        self.assertEqual(reports[0]["side"], "BUY")
+        self.assertEqual(reports[0]["symbol"], "BTCUSDC")
 
     def test_pending_action_blocks_duplicate_order_after_restart(self):
         client = FakeClient()

@@ -46,14 +46,18 @@ export default function TradingDashboard() {
   const stats = useMemo(() => {
     const now = Date.now();
     const pnl = (since: number) => trades.filter((trade) => new Date(trade.created_at).getTime() >= since).reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
-    const invested = trades.filter((trade) => trade.side === "BUY").reduce((sum, trade) => sum + Number(trade.quantity) * Number(trade.entry_price ?? 0), 0);
+    const won = trades.reduce((sum, trade) => sum + Math.max(0, Number(trade.pnl ?? 0)), 0);
+    const lost = trades.reduce((sum, trade) => sum + Math.min(0, Number(trade.pnl ?? 0)), 0);
     const feesEstimate = trades.reduce((sum, trade) => sum + Number(trade.quantity) * Number(trade.entry_price ?? trade.exit_price ?? 0) * 0.001, 0);
-    return { total: pnl(0), day: pnl(now - 86_400_000), hour: pnl(now - 3_600_000), invested, feesEstimate };
+    return { total: pnl(0), day: pnl(now - 86_400_000), hour: pnl(now - 3_600_000), won, lost, feesEstimate };
   }, [trades]);
 
   const allocations = useMemo(() => assets.map((asset) => {
     const symbol = `${asset}${settings.quote_asset}`;
-    const invested = trades.filter((trade) => trade.symbol === symbol && trade.side === "BUY").reduce((sum, trade) => sum + Number(trade.quantity) * Number(trade.entry_price ?? 0), 0);
+    const invested = trades.filter((trade) => trade.symbol === symbol).reduce((sum, trade) => {
+      const cost = Number(trade.quantity) * Number(trade.entry_price ?? 0);
+      return Math.max(0, sum + (trade.side === "BUY" ? cost : -cost));
+    }, 0);
     const pnl = trades.filter((trade) => trade.symbol === symbol).reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
     return { asset, invested, pnl };
   }), [settings.quote_asset, trades]);
@@ -69,6 +73,17 @@ export default function TradingDashboard() {
     setSaving(false); setMessage(error ? error.message : "Innstillingene er lagret."); if (!error) setSettings(safe);
   }
 
+  async function setLive(enabled: boolean) {
+    setSaving(true); setMessage("");
+    const next = { ...settings, bot_enabled: enabled, live_trading_enabled: enabled };
+    const { data: userData } = await supabase.auth.getUser();
+    if (!userData.user) { setSaving(false); return; }
+    const { error } = await supabase.from("bot_settings").upsert({ ...next, user_id: userData.user.id, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+    if (!error) setSettings(next);
+    setMessage(error ? error.message : enabled ? "Live trading er aktivert." : "Trading er pauset.");
+    setSaving(false);
+  }
+
   async function emergencyStop() {
     setSaving(true);
     const next = { ...settings, bot_enabled: false, live_trading_enabled: false };
@@ -79,11 +94,13 @@ export default function TradingDashboard() {
   }
 
   return <main className="shell">
-    <header className="topbar"><div><span className="eyebrow">AI TRADING APP</span><h1>Kontrollpanel</h1></div><span className="pill"><i /> Server tilkoblet</span></header>
+    <header className="topbar"><div><span className="eyebrow">AI TRADING APP</span><h1>Kontrollpanel</h1></div><span className="pill"><i /> Dashboard aktivt</span></header>
     <section className="hero"><div><p className="eyebrow">BEGRENSET LIVE-RAMME</p><h2>100 USDC. Spot-only. Harde tapsgrenser.</h2><p className="muted">Binance-uttak, futures og giring er deaktivert.</p></div><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button></section>
     <section className="grid metrics">
       <article><span className="label">Handelsramme</span><strong>{money(settings.trade_cap_usdc)} USDC</strong><small>Resten av saldoen er utenfor boten</small></article>
       <article><span className="label">Totalt resultat</span><strong className={stats.total < 0 ? "loss" : "gain"}>{money(stats.total)} USDC</strong><small>Realisert gevinst/tap</small></article>
+      <article><span className="label">Vunnet</span><strong className="gain">{money(stats.won)} USDC</strong><small>Sum lønnsomme handler</small></article>
+      <article><span className="label">Tapt</span><strong className="loss">{money(Math.abs(stats.lost))} USDC</strong><small>Sum tapte handler</small></article>
       <article><span className="label">Siste døgn</span><strong className={stats.day < 0 ? "loss" : "gain"}>{money(stats.day)} USDC</strong><small>Siste time: {money(stats.hour)} USDC</small></article>
       <article><span className="label">Estimerte gebyrer</span><strong>{money(stats.feesEstimate)} USDC</strong><small>{trades.length} registrerte ordre</small></article>
     </section>
@@ -95,7 +112,7 @@ export default function TradingDashboard() {
         <Field label="Gevinstmål (%)" value={settings.take_profit_percent} min={0.5} max={25} step={0.5} onChange={(value) => update("take_profit_percent", value)} />
         <Field label="Maks dagstap (USDC)" value={settings.max_daily_loss_usdc} min={0.5} max={settings.trade_cap_usdc} step={0.5} onChange={(value) => update("max_daily_loss_usdc", value)} />
         <label className="select-field"><span>Risikonivå</span><select value={settings.risk_profile} onChange={(event) => update("risk_profile", event.target.value as Settings["risk_profile"])}><option value="low">Lav</option><option value="normal">Normal</option><option value="high">Høy</option></select></label>
-      </div><div className="actions"><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button></div>{message && <p className="inline-message">{message}</p>}
+      </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button></div>{message && <p className="inline-message">{message}</p>}
     </section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">Historikk fra boten</span></div><div className="assets">{allocations.map(({ asset, invested, pnl }) => <div className="asset" key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b><small>Investert: {money(invested)} USDC</small></div><span className={pnl < 0 ? "loss" : "gain"}>{money(pnl)} USDC</span></div>)}</div></section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><span className="muted">Oppdateres hvert 30. sekund</span></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list">{trades.slice(0, 10).map((trade) => <div className="trade-row" key={trade.id}><b>{trade.side} {trade.symbol}</b><span>{Number(trade.quantity).toPrecision(6)}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{money(Number(trade.pnl ?? 0))} USDC</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>)}</div>}</section>
