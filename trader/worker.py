@@ -108,12 +108,9 @@ def main() -> None:
             LOG.info("health check passed; authenticated_account_read=%s", authenticated)
 
             signals, analyses, context = market_scan(client, news_monitor, pairs, risk_profile)
-            LOG.info(
-                "market scan; buy_signals=%s; %s; scores=%s",
-                ",".join(pair for pair, signal in signals.items() if signal) or "none",
-                context,
-                ",".join(f"{pair}:{analysis.score}" for pair, analysis in analyses.items()),
-            )
+            signal_text = ",".join(pair for pair, signal in signals.items() if signal) or "none"
+            score_text = ",".join(f"{pair}:{analysis.score}" for pair, analysis in analyses.items())
+            LOG.info("market scan; buy_signals=%s; %s; scores=%s", signal_text, context, score_text)
 
             dashboard_live = (
                 bool(settings.get("bot_enabled")) and bool(settings.get("live_trading_enabled"))
@@ -121,12 +118,13 @@ def main() -> None:
             )
             allow_new_entries = master_live and dashboard_live
 
-            if reporter and time.time() - last_heartbeat >= 600:
+            if reporter and time.time() - last_heartbeat >= 120:
                 best_pair = max(analyses, key=lambda pair: analyses[pair].score)
                 best = analyses[best_pair]
                 reporter.record_event(
                     "heartbeat",
-                    f"live={allow_new_entries};{context};best={best_pair}:{best.score};reasons={','.join(best.reasons)}",
+                    f"live={allow_new_entries};{context};signals={signal_text};scores={score_text};"
+                    f"best={best_pair}:{best.score};reasons={','.join(best.reasons)}",
                 )
                 last_heartbeat = time.time()
 
