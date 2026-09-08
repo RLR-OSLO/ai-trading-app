@@ -30,6 +30,32 @@ class BinanceClientTests(unittest.TestCase):
                 live_trading_enabled=False,
             )
 
+    def test_protective_oco_uses_current_spot_order_list_endpoint(self) -> None:
+        class CaptureClient(BinanceSpotClient):
+            def __init__(self):
+                super().__init__(BinanceCredentials("api", "secret"))
+                self.request = None
+
+            def _request(self, method, path, params=None, *, signed=False):
+                self.request = (method, path, params, signed)
+                return {"orderListId": 1, "orders": [{"orderId": 2}, {"orderId": 3}]}
+
+        client = CaptureClient()
+        client.place_protective_oco_sell(
+            symbol="BTCUSDC",
+            quantity=Decimal("0.001"),
+            target_price=Decimal("80000"),
+            stop_price=Decimal("76000"),
+            live_trading_enabled=True,
+        )
+        method, path, params, signed = client.request
+        self.assertEqual(method, "POST")
+        self.assertEqual(path, "/api/v3/orderList/oco")
+        self.assertTrue(signed)
+        self.assertEqual(params["side"], "SELL")
+        self.assertEqual(params["aboveType"], "LIMIT_MAKER")
+        self.assertEqual(params["belowType"], "STOP_LOSS")
+
     def test_default_pair_allowlist(self) -> None:
         self.assertEqual(
             configured_pairs(),
