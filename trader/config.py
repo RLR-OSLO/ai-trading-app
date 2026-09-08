@@ -20,13 +20,15 @@ class TradingConfig:
 
 DEFAULT_CONFIG = TradingConfig(
     starting_capital_nok=Decimal("6000"),
-    symbols=("BTC", "ETH", "SOL", "BNB", "XRP"),
+    symbols=(
+        "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "LINK", "DOT",
+        "LTC", "BCH", "TRX", "SUI", "TON", "NEAR", "APT", "UNI", "XLM", "ETC",
+    ),
     preferred_quote_assets=("USDC", "USDT"),
     risk_per_trade=Decimal("0.005"),
     daily_loss_limit=Decimal("0.02"),
     hard_drawdown_limit=Decimal("0.08"),
     starting_reserve=Decimal("0.20"),
     weekly_profit_lock=Decimal("0.25"),
-    max_open_positions=3,
+    max_open_positions=5,
 )
-
