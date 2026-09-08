@@ -17,6 +17,11 @@ from .reporting import SupabaseReporter
 LOG = logging.getLogger("ai_trader")
 RISK_THRESHOLDS = {"low": 7, "normal": 6, "high": 4}
 ACTIVE_MARKET_COUNT = 20
+MARKET_UNIVERSE = (
+    "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LINK",
+    "SUI", "XLM", "BCH", "LTC", "DOT", "SHIB", "TON", "HBAR", "UNI", "AAVE",
+    "NEAR", "APT", "ETC", "FIL", "ICP", "ATOM", "ALGO", "VET", "POL", "ARB",
+)
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -47,7 +52,9 @@ def build_client() -> BinanceSpotClient:
 
 
 def active_pairs(client: BinanceSpotClient, quote_asset: str) -> tuple[str, ...]:
-    requested = set(configured_pairs(quote_asset))
+    if quote_asset not in DEFAULT_CONFIG.preferred_quote_assets:
+        raise ValueError("Quote asset is outside the approved allowlist")
+    requested = {f"{asset}{quote_asset}" for asset in MARKET_UNIVERSE}
     exchange_info = client._request("GET", "/api/v3/exchangeInfo")
     available = {
         item.get("symbol")
@@ -70,8 +77,14 @@ def active_pairs(client: BinanceSpotClient, quote_asset: str) -> tuple[str, ...]
     return selected
 
 
-def readiness_check(client: BinanceSpotClient) -> bool:
+def readiness_check(client: BinanceSpotClient, pairs: tuple[str, ...] | None = None) -> bool:
     client.server_time()
+    if pairs:
+        info = client.exchange_info(pairs)
+        available = {item["symbol"] for item in info.get("symbols", [])}
+        missing = set(pairs) - available
+        if missing:
+            raise BinanceError(f"Approved pairs unavailable: {sorted(missing)}")
     if client.credentials is not None:
         client.account()
         return True
