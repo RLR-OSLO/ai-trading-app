@@ -4,13 +4,15 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
-from trader.portfolio_live import PortfolioLimits, PortfolioState, load_state, run_portfolio_cycle, save_state
+from trader.portfolio_live import PortfolioLimits, load_state, run_portfolio_cycle, save_state
 
 
 class FakeClient:
     def __init__(self):
         self.live_buys = 0
         self.oco_orders = 0
+        self.cancelled_oco = 0
+        self.live_sells = 0
         self.price = Decimal("100")
 
     def account(self):
@@ -43,10 +45,18 @@ class FakeClient:
     def query_order_by_id(self, **_kwargs):
         return {"status": "NEW", "executedQty": "0", "cummulativeQuoteQty": "0"}
 
+    def cancel_order_list(self, **_kwargs):
+        self.cancelled_oco += 1
+        return {"orderListId": 1, "listOrderStatus": "ALL_DONE"}
+
+    def place_spot_order(self, **_kwargs):
+        self.live_sells += 1
+        return {"cummulativeQuoteQty": "25.10"}
+
 
 class PortfolioLiveTests(unittest.TestCase):
     def limits(self):
-        return PortfolioLimits.from_values("200", "25", "1", "2", "5", max_trades=40, cooldown=15, max_positions=5)
+        return PortfolioLimits.from_values("200", "25", "1", "2", "5", max_trades=80, cooldown=15, max_positions=5)
 
     def test_migrates_legacy_single_position_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -61,6 +71,7 @@ class PortfolioLiveTests(unittest.TestCase):
             state = load_state(path)
         self.assertEqual(len(state.positions), 1)
         self.assertEqual(state.positions[0].symbol, "BNBUSDC")
+        self.assertEqual(state.positions[0].strategy, "swing")
         self.assertEqual(state.positions[0].protective_order_list_id, 77)
 
     def test_can_hold_multiple_symbols_at_once(self):
@@ -79,6 +90,46 @@ class PortfolioLiveTests(unittest.TestCase):
         self.assertEqual(client.live_buys, 2)
         self.assertEqual(client.oco_orders, 2)
 
+    def test_scalp_entry_gets_tight_limits_and_timebox(self):
+        client = FakeClient()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            result = run_portfolio_cycle(
+                client,
+                {"BTCUSDC": True},
+                path,
+                self.limits(),
+                entry_strategies={"BTCUSDC": "scalp"},
+            )
+            state = load_state(path)
+        position = state.positions[0]
+        self.assertIn("strategy=scalp", result)
+        self.assertEqual(position.strategy, "scalp")
+        self.assertEqual(position.stop_fraction, "0.0045")
+        self.assertEqual(position.target_fraction, "0.0075")
+        self.assertEqual(position.max_hold_seconds, 900)
+        self.assertEqual(client.oco_orders, 1)
+
+    def test_expired_scalp_cancels_oco_before_market_exit(self):
+        client = FakeClient()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            run_portfolio_cycle(
+                client,
+                {"BTCUSDC": True},
+                path,
+                self.limits(),
+                entry_strategies={"BTCUSDC": "scalp"},
+            )
+            state = load_state(path)
+            state.positions[0].opened_at = 1
+            state.cooldown_until = 0
+            save_state(path, state)
+            result = run_portfolio_cycle(client, {"BTCUSDC": False}, path, self.limits())
+        self.assertIn("reason=timeout", result)
+        self.assertEqual(client.cancelled_oco, 1)
+        self.assertEqual(client.live_sells, 1)
+
     def test_high_profile_is_aggressive_but_bounded(self):
         limits = PortfolioLimits.from_settings({
             "risk_profile": "high",
@@ -89,8 +140,8 @@ class PortfolioLiveTests(unittest.TestCase):
             "max_daily_loss_usdc": "5",
         })
         self.assertEqual(limits.max_open_positions, 5)
-        self.assertEqual(limits.cooldown_seconds, 30)
-        self.assertEqual(limits.max_trades_per_day, 40)
+        self.assertEqual(limits.cooldown_seconds, 15)
+        self.assertEqual(limits.max_trades_per_day, 80)
 
 
 if __name__ == "__main__":
