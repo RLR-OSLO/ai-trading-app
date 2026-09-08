@@ -12,6 +12,7 @@ from .config import DEFAULT_CONFIG
 from .news import NewsMonitor
 from .portfolio_live import PortfolioLimits, run_portfolio_cycle
 from .reporting import SupabaseReporter
+from .scalping import ScalpAnalysis, analyze_scalp
 
 
 LOG = logging.getLogger("ai_trader")
@@ -103,28 +104,64 @@ def market_scan(
     news_monitor: NewsMonitor,
     pairs: tuple[str, ...],
     risk_profile: str,
-) -> tuple[dict[str, bool], dict[str, MarketAnalysis], str]:
-    frames = {
+) -> tuple[
+    dict[str, bool],
+    dict[str, MarketAnalysis],
+    dict[str, ScalpAnalysis],
+    dict[str, str],
+    str,
+]:
+    swing_frames = {
         pair: {interval: client.klines(pair, interval, limit=101)[:-1] for interval in ("15m", "1h", "4h")}
         for pair in pairs
     }
-    btc_pair = next((pair for pair in pairs if pair.startswith("BTC")), pairs[0])
-    btc_regime = bullish_btc_regime(frames[btc_pair])
-    news = news_monitor.score()
-    analyses = {pair: analyze_market(data) for pair, data in frames.items()}
-    ordered = sorted(analyses, key=lambda pair: analyses[pair].score, reverse=True)
-    threshold = RISK_THRESHOLDS.get(risk_profile, RISK_THRESHOLDS["normal"])
-    signals = {
-        pair: analyses[pair].score >= threshold
-        and "risk_veto" not in analyses[pair].reasons
-        and not news.blocks_new_positions
-        for pair in ordered
+    scalp_frames = {
+        pair: {interval: client.klines(pair, interval, limit=61)[:-1] for interval in ("1m", "5m")}
+        for pair in pairs
     }
-    context = (
-        f"threshold={threshold};risk={risk_profile};btc_regime={btc_regime};"
-        f"news={news.score:.2f};headlines={news.fresh_headlines}"
+
+    btc_pair = next((pair for pair in pairs if pair.startswith("BTC")), pairs[0])
+    btc_regime = bullish_btc_regime(swing_frames[btc_pair])
+    news = news_monitor.score()
+    analyses = {pair: analyze_market(data) for pair, data in swing_frames.items()}
+    aggressive_scalping = risk_profile == "high"
+    scalp_analyses = {
+        pair: analyze_scalp(data, aggressive=aggressive_scalping)
+        for pair, data in scalp_frames.items()
+    }
+
+    swing_threshold = RISK_THRESHOLDS.get(risk_profile, RISK_THRESHOLDS["normal"])
+    scalp_enabled = risk_profile in {"normal", "high"}
+    blocked_by_news = news.blocks_new_positions
+
+    ranked = sorted(
+        pairs,
+        key=lambda pair: (
+            1 if scalp_enabled and scalp_analyses[pair].signal else 0,
+            scalp_analyses[pair].score,
+            analyses[pair].score,
+        ),
+        reverse=True,
     )
-    return signals, analyses, context
+
+    signals: dict[str, bool] = {}
+    strategies: dict[str, str] = {}
+    for pair in ranked:
+        swing_signal = (
+            analyses[pair].score >= swing_threshold
+            and "risk_veto" not in analyses[pair].reasons
+            and not blocked_by_news
+        )
+        scalp_signal = scalp_enabled and scalp_analyses[pair].signal and not blocked_by_news
+        signals[pair] = scalp_signal or swing_signal
+        strategies[pair] = "scalp" if scalp_signal else "swing"
+
+    scalp_signal_text = ",".join(pair for pair in ranked if scalp_enabled and scalp_analyses[pair].signal) or "none"
+    context = (
+        f"threshold={swing_threshold};risk={risk_profile};btc_regime={btc_regime};"
+        f"news={news.score:.2f};headlines={news.fresh_headlines};scalp={scalp_signal_text}"
+    )
+    return signals, analyses, scalp_analyses, strategies, context
 
 
 def main() -> None:
@@ -138,9 +175,10 @@ def main() -> None:
     master_live = _bool_env("LIVE_TRADING_ENABLED")
     state_path = Path(os.getenv("LIVE_STATE_PATH", "/var/lib/ai-trading-app/live-state.json"))
     last_heartbeat = 0.0
-    LOG.info("worker starting; master_live=%s", master_live)
+    LOG.info("worker starting; master_live=%s; scalping=1m/5m", master_live)
 
     while True:
+        risk_profile = "normal"
         try:
             settings = reporter.get_settings() if reporter else None
             quote_asset = str((settings or {}).get("quote_asset") or os.getenv("TRADING_QUOTE_ASSET", "USDC")).upper()
@@ -156,10 +194,24 @@ def main() -> None:
                 ",".join(pairs),
             )
 
-            signals, analyses, context = market_scan(client, news_monitor, pairs, risk_profile)
-            signal_text = ",".join(pair for pair, signal in signals.items() if signal) or "none"
+            signals, analyses, scalp_analyses, strategies, context = market_scan(
+                client,
+                news_monitor,
+                pairs,
+                risk_profile,
+            )
+            signal_text = ",".join(
+                f"{pair}:{strategies[pair]}" for pair, signal in signals.items() if signal
+            ) or "none"
             score_text = ",".join(f"{pair}:{analysis.score}" for pair, analysis in analyses.items())
-            LOG.info("market scan; buy_signals=%s; %s; scores=%s", signal_text, context, score_text)
+            scalp_score_text = ",".join(f"{pair}:{analysis.score}" for pair, analysis in scalp_analyses.items())
+            LOG.info(
+                "market scan; buy_signals=%s; %s; swing_scores=%s; scalp_scores=%s",
+                signal_text,
+                context,
+                score_text,
+                scalp_score_text,
+            )
 
             dashboard_live = (
                 bool(settings.get("bot_enabled")) and bool(settings.get("live_trading_enabled"))
@@ -168,14 +220,22 @@ def main() -> None:
             allow_new_entries = master_live and dashboard_live
 
             if reporter and time.time() - last_heartbeat >= 30:
-                best_pair = max(analyses, key=lambda pair: analyses[pair].score)
-                best = analyses[best_pair]
+                best_pair = max(
+                    pairs,
+                    key=lambda pair: (
+                        1 if scalp_analyses[pair].signal else 0,
+                        scalp_analyses[pair].score,
+                        analyses[pair].score,
+                    ),
+                )
                 price_text = ",".join(f"{pair}:{client.ticker_price(pair)}" for pair in pairs)
                 reporter.record_event(
                     "heartbeat",
                     f"live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
-                    f"signals={signal_text};scores={score_text};prices={price_text};markets={','.join(pairs)};"
-                    f"best={best_pair}:{best.score};reasons={','.join(best.reasons)}",
+                    f"signals={signal_text};scores={score_text};scalp_scores={scalp_score_text};"
+                    f"prices={price_text};markets={','.join(pairs)};"
+                    f"best={best_pair}:{strategies[best_pair]}:{analyses[best_pair].score}/{scalp_analyses[best_pair].score};"
+                    f"reasons={','.join(scalp_analyses[best_pair].reasons if strategies[best_pair] == 'scalp' else analyses[best_pair].reasons)}",
                 )
                 last_heartbeat = time.time()
 
@@ -189,6 +249,7 @@ def main() -> None:
                 reporter.record_trade if reporter else None,
                 allow_new_entries=allow_new_entries,
                 quote_asset=quote_asset,
+                entry_strategies=strategies,
             )
             if not allow_new_entries and result == "paused_new_entries":
                 LOG.info("new entries paused; no open position requires management")
@@ -196,7 +257,9 @@ def main() -> None:
                 LOG.warning("live cycle result=%s", result)
         except Exception:
             LOG.exception("trading cycle failed; no new order will be submitted")
-        time.sleep(int(os.getenv("WORKER_INTERVAL_SECONDS", "30")))
+
+        default_interval = 15 if risk_profile == "high" else 30
+        time.sleep(int(os.getenv("WORKER_INTERVAL_SECONDS", str(default_interval))))
 
 
 if __name__ == "__main__":
