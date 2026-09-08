@@ -38,6 +38,8 @@ class LiveState:
     cooldown_until: int = 0
     position: Position | None = None
     pending_action: str | None = None
+    pending_client_order_id: str | None = None
+    pending_since: int = 0
 
 
 @dataclass(frozen=True)
@@ -128,6 +130,8 @@ def load_state(path: Path) -> LiveState:
         cooldown_until=int(raw.get("cooldown_until", 0)),
         position=position,
         pending_action=raw.get("pending_action"),
+        pending_client_order_id=raw.get("pending_client_order_id"),
+        pending_since=int(raw.get("pending_since", 0)),
     )
     if state.day != _today():
         state.day, state.realized_pnl, state.trades_today = _today(), "0", 0
@@ -165,6 +169,85 @@ def _sellable_quantity(client: BinanceSpotClient, symbol: str, quantity: Decimal
     return (quantity / step).to_integral_value(rounding=ROUND_DOWN) * step
 
 
+def _clear_pending(state: LiveState) -> None:
+    state.pending_action = None
+    state.pending_client_order_id = None
+    state.pending_since = 0
+
+
+def _new_client_order_id(side: str, now: int) -> str:
+    return f"ait-{side.lower()}-{now}"
+
+
+def _reconcile_pending(
+    client: BinanceSpotClient,
+    state: LiveState,
+    state_path: Path,
+    quote_asset: str,
+    limits: LiveLimits,
+    report_trade: Callable[[dict[str, Any]], None] | None,
+) -> str | None:
+    if not state.pending_action:
+        return None
+    if not state.pending_client_order_id:
+        return f"paused_pending_reconciliation:{state.pending_action}"
+
+    side, symbol = state.pending_action.split(":", 1)
+    try:
+        order = client.query_order(symbol=symbol, orig_client_order_id=state.pending_client_order_id)
+    except BinanceError as exc:
+        # If Binance confirms that no such order exists, the crash happened before
+        # submission. Clear the stale marker after a short grace period and retry
+        # normally on the next cycle. Other errors remain fail-closed.
+        if "-2013" in str(exc) and state.pending_since and int(time.time()) - state.pending_since >= 60:
+            _clear_pending(state)
+            save_state(state_path, state)
+            return "reconciled_missing_order"
+        return f"paused_pending_reconciliation:{state.pending_action}"
+
+    status = str(order.get("status", ""))
+    if status not in {"FILLED", "CANCELED", "EXPIRED", "REJECTED"}:
+        return f"pending_exchange_order:{side}:{status or 'UNKNOWN'}"
+
+    if status != "FILLED":
+        _clear_pending(state)
+        save_state(state_path, state)
+        return f"reconciled_{status.lower()}:{side}:{symbol}"
+
+    executed = Decimal(str(order.get("executedQty", "0")))
+    quote_qty = Decimal(str(order.get("cummulativeQuoteQty", "0")))
+    now = int(time.time())
+
+    if side == "BUY":
+        if executed <= 0 or quote_qty <= 0:
+            return f"paused_pending_reconciliation:{state.pending_action}"
+        base_asset = symbol.removesuffix(quote_asset)
+        available = _free_balance(client, base_asset)
+        quantity = min(executed, available) if available > 0 else executed
+        state.position = Position(symbol, str(quantity), str(quote_qty / executed), str(quote_qty), state.pending_since or now)
+        state.trades_today += 1
+        _clear_pending(state)
+        save_state(state_path, state)
+        if report_trade:
+            report_trade({"symbol": symbol, "side": "BUY", "quantity": str(quantity), "entry_price": str(quote_qty / executed), "exit_price": None, "pnl": None})
+        return f"reconciled_buy:{symbol}"
+
+    if side == "SELL" and state.position:
+        position = state.position
+        pnl = quote_qty - Decimal(position.quote_spent)
+        state.realized_pnl = str(Decimal(state.realized_pnl) + pnl)
+        state.position = None
+        state.trades_today += 1
+        state.cooldown_until = now + limits.cooldown_seconds
+        _clear_pending(state)
+        save_state(state_path, state)
+        if report_trade:
+            report_trade({"symbol": symbol, "side": "SELL", "quantity": str(executed), "entry_price": position.entry_price, "exit_price": str(quote_qty / executed) if executed else None, "pnl": str(pnl)})
+        return f"reconciled_sell:{symbol}:pnl={pnl}"
+
+    return f"paused_pending_reconciliation:{state.pending_action}"
+
+
 def run_live_cycle(
     client: BinanceSpotClient,
     signals: dict[str, bool],
@@ -180,8 +263,9 @@ def run_live_cycle(
     realized = Decimal(state.realized_pnl)
     quote_asset = quote_asset.upper()
 
-    if state.pending_action:
-        return f"paused_pending_reconciliation:{state.pending_action}"
+    reconciled = _reconcile_pending(client, state, state_path, quote_asset, limits, report_trade)
+    if reconciled:
+        return reconciled
 
     # Existing positions are always managed, even when new entries are paused
     # or the daily loss limit has been reached.
@@ -196,7 +280,10 @@ def run_live_cycle(
         quantity = _sellable_quantity(client, position.symbol, Decimal(position.quantity))
         if quantity <= 0:
             raise BinanceError("No sellable quantity remains for the open position")
+        client_order_id = _new_client_order_id("SELL", now)
         state.pending_action = f"SELL:{position.symbol}"
+        state.pending_client_order_id = client_order_id
+        state.pending_since = now
         save_state(state_path, state)
         order = client.place_spot_order(
             symbol=position.symbol,
@@ -204,12 +291,13 @@ def run_live_cycle(
             order_type="MARKET",
             quantity=quantity,
             live_trading_enabled=True,
+            client_order_id=client_order_id,
         )
         received = Decimal(str(order.get("cummulativeQuoteQty", "0")))
         pnl = received - Decimal(position.quote_spent)
         state.realized_pnl = str(realized + pnl)
         state.position = None
-        state.pending_action = None
+        _clear_pending(state)
         state.trades_today += 1
         state.cooldown_until = now + limits.cooldown_seconds
         save_state(state_path, state)
@@ -243,12 +331,16 @@ def run_live_cycle(
     if not symbol.endswith(quote_asset):
         raise BinanceError(f"Signal symbol {symbol} does not match quote asset {quote_asset}")
     client.test_market_buy(symbol=symbol, quote_quantity=limits.order_size)
+    client_order_id = _new_client_order_id("BUY", now)
     state.pending_action = f"BUY:{symbol}"
+    state.pending_client_order_id = client_order_id
+    state.pending_since = now
     save_state(state_path, state)
     order = client.market_buy_by_quote(
         symbol=symbol,
         quote_quantity=limits.order_size,
         live_trading_enabled=True,
+        client_order_id=client_order_id,
     )
     spent = Decimal(str(order.get("cummulativeQuoteQty", "0")))
     executed = Decimal(str(order.get("executedQty", "0")))
@@ -265,7 +357,7 @@ def run_live_cycle(
         quote_spent=str(spent),
         opened_at=now,
     )
-    state.pending_action = None
+    _clear_pending(state)
     state.trades_today += 1
     save_state(state_path, state)
     if report_trade:
