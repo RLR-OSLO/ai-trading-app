@@ -6,10 +6,11 @@ import time
 from pathlib import Path
 
 from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
+from .analysis import MarketAnalysis, analyze_market, bullish_btc_regime
 from .config import DEFAULT_CONFIG
 from .live import LiveLimits, run_live_cycle
+from .news import NewsMonitor
 from .reporting import SupabaseReporter
-from .simulation import paper_signal_from_klines
 
 
 LOG = logging.getLogger("ai_trader")
@@ -56,12 +57,22 @@ def readiness_check(client: BinanceSpotClient) -> bool:
     return False
 
 
-def paper_scan(client: BinanceSpotClient) -> dict[str, bool]:
-    """Read market data and return paper signals without placing orders."""
-    return {
-        pair: paper_signal_from_klines(client.klines(pair, "15m", limit=100))
-        for pair in configured_pairs()
+def market_scan(client: BinanceSpotClient, news_monitor: NewsMonitor) -> tuple[dict[str, bool], dict[str, MarketAnalysis], str]:
+    pairs = configured_pairs()
+    frames = {
+        pair: {interval: client.klines(pair, interval, limit=101)[:-1] for interval in ("15m", "1h", "4h")}
+        for pair in pairs
     }
+    regime = bullish_btc_regime(frames[pairs[0]])
+    news = news_monitor.score()
+    analyses = {pair: analyze_market(data) for pair, data in frames.items()}
+    ordered = sorted(analyses, key=lambda pair: analyses[pair].score, reverse=True)
+    signals = {
+        pair: analyses[pair].signal and not news.blocks_new_positions and (pair == "BTCUSDC" or regime)
+        for pair in ordered
+    }
+    context = f"btc_regime={regime};news={news.score:.2f};headlines={news.fresh_headlines}"
+    return signals, analyses, context
 
 
 def main() -> None:
@@ -71,7 +82,9 @@ def main() -> None:
     )
     client = build_client()
     reporter = SupabaseReporter.from_env()
+    news_monitor = NewsMonitor()
     master_live = _bool_env("LIVE_TRADING_ENABLED")
+    last_heartbeat = 0.0
     LOG.info(
         "worker starting; live_trading=%s; symbols=%s",
         master_live,
@@ -85,16 +98,24 @@ def main() -> None:
                 "health check passed; authenticated_account_read=%s",
                 authenticated,
             )
-            signals = paper_scan(client)
+            signals, analyses, context = market_scan(client, news_monitor)
             LOG.info(
-                "paper scan; buy_signals=%s",
+                "market scan; buy_signals=%s; %s; scores=%s",
                 ",".join(pair for pair, signal in signals.items() if signal) or "none",
+                context,
+                ",".join(f"{pair}:{analysis.score}" for pair, analysis in analyses.items()),
             )
             settings = reporter.get_settings() if reporter else None
-            dashboard_live = settings is None or (
+            dashboard_live = (
                 bool(settings.get("bot_enabled")) and bool(settings.get("live_trading_enabled"))
+                if settings is not None else reporter is None
             )
             live = master_live and dashboard_live
+            if reporter and time.time() - last_heartbeat >= 600:
+                best_pair = max(analyses, key=lambda pair: analyses[pair].score)
+                best = analyses[best_pair]
+                reporter.record_event("heartbeat", f"live={live};{context};best={best_pair}:{best.score};reasons={','.join(best.reasons)}")
+                last_heartbeat = time.time()
             if master_live and not live:
                 LOG.warning("live cycle paused by dashboard")
             if live:

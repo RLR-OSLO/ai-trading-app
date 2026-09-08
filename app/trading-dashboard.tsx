@@ -16,6 +16,7 @@ type Settings = {
 };
 
 type Trade = { id: string; symbol: string; side: "BUY" | "SELL"; quantity: number; entry_price: number | null; exit_price: number | null; pnl: number | null; created_at: string };
+type BotEvent = { id: number; level: "info" | "warning" | "error"; event_type: string; message: string; created_at: string };
 
 const defaults: Settings = { bot_enabled: false, live_trading_enabled: false, risk_profile: "normal", quote_asset: "USDC", trade_cap_usdc: 100, order_size_usdc: 25, stop_loss_percent: 1, take_profit_percent: 2, max_daily_loss_usdc: 2 };
 const assets = ["BTC", "ETH", "SOL", "BNB", "XRP"];
@@ -27,17 +28,20 @@ export default function TradingDashboard() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [loaded, setLoaded] = useState(false);
+  const [lastEvent, setLastEvent] = useState<BotEvent | null>(null);
 
   const load = useCallback(async () => {
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) return;
-    const [{ data: row, error }, { data: recent }] = await Promise.all([
+    const [{ data: row, error }, { data: recent }, { data: events }] = await Promise.all([
       supabase.from("bot_settings").select("bot_enabled,live_trading_enabled,risk_profile,quote_asset,trade_cap_usdc,order_size_usdc,stop_loss_percent,take_profit_percent,max_daily_loss_usdc").eq("user_id", userData.user.id).maybeSingle(),
       supabase.from("trades").select("id,symbol,side,quantity,entry_price,exit_price,pnl,created_at").order("created_at", { ascending: false }).limit(50),
+      supabase.from("bot_events").select("id,level,event_type,message,created_at").order("created_at", { ascending: false }).limit(1),
     ]);
     if (error) setMessage(error.message);
     if (row) setSettings(row as Settings);
     if (recent) setTrades(recent as Trade[]);
+    if (events?.[0]) setLastEvent(events[0] as BotEvent);
     setLoaded(true);
   }, []);
 
@@ -61,6 +65,7 @@ export default function TradingDashboard() {
     const pnl = trades.filter((trade) => trade.symbol === symbol).reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
     return { asset, invested, pnl };
   }), [settings.quote_asset, trades]);
+  const serverOnline = lastEvent ? Date.now() - new Date(lastEvent.created_at).getTime() < 900_000 : false;
 
   function update<K extends keyof Settings>(key: K, value: Settings[K]) { setSettings((current) => ({ ...current, [key]: value })); }
 
@@ -94,7 +99,7 @@ export default function TradingDashboard() {
   }
 
   return <main className="shell">
-    <header className="topbar"><div><span className="eyebrow">AI TRADING APP</span><h1>Kontrollpanel</h1></div><span className="pill"><i /> Dashboard aktivt</span></header>
+    <header className="topbar"><div><span className="eyebrow">AI TRADING APP</span><h1>Kontrollpanel</h1></div><span className="pill"><i /> {serverOnline ? "Server online" : "Ingen fersk serverstatus"}</span></header>
     <section className="hero"><div><p className="eyebrow">BEGRENSET LIVE-RAMME</p><h2>100 USDC. Spot-only. Harde tapsgrenser.</h2><p className="muted">Binance-uttak, futures og giring er deaktivert.</p></div><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button></section>
     <section className="grid metrics">
       <article><span className="label">Handelsramme</span><strong>{money(settings.trade_cap_usdc)} USDC</strong><small>Resten av saldoen er utenfor boten</small></article>
@@ -116,6 +121,7 @@ export default function TradingDashboard() {
     </section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">Historikk fra boten</span></div><div className="assets">{allocations.map(({ asset, invested, pnl }) => <div className="asset" key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b><small>Investert: {money(invested)} USDC</small></div><span className={pnl < 0 ? "loss" : "gain"}>{money(pnl)} USDC</span></div>)}</div></section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><span className="muted">Oppdateres hvert 30. sekund</span></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list">{trades.slice(0, 10).map((trade) => <div className="trade-row" key={trade.id}><b>{trade.side} {trade.symbol}</b><span>{Number(trade.quantity).toPrecision(6)}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{money(Number(trade.pnl ?? 0))} USDC</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>)}</div>}</section>
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">SERVERSTATUS</p><h3>Siste kontrollsignal</h3></div>{lastEvent && <time className="muted">{new Date(lastEvent.created_at).toLocaleString("nb-NO")}</time>}</div><p className={lastEvent?.level === "error" ? "loss" : "muted"}>{lastEvent?.message ?? "Serverrapportering er ikke koblet til ennå."}</p></section>
   </main>;
 }
 
