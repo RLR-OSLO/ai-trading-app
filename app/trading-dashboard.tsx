@@ -15,8 +15,9 @@ type Settings = {
   max_daily_loss_usdc: number;
 };
 
-type Trade = { id: string; symbol: string; side: "BUY" | "SELL"; quantity: number; entry_price: number | null; exit_price: number | null; pnl: number | null; created_at: string };
+type Trade = { id: string; symbol: string; mode: string; side: "BUY" | "SELL"; quantity: number; entry_price: number | null; exit_price: number | null; pnl: number | null; created_at: string };
 type BotEvent = { id: number; level: "info" | "warning" | "error"; event_type: string; message: string; created_at: string };
+type ChatMessage = { id: number; role: "boss" | "bot"; text: string };
 
 const defaults: Settings = { bot_enabled: false, live_trading_enabled: false, risk_profile: "normal", quote_asset: "USDC", trade_cap_usdc: 100, order_size_usdc: 25, stop_loss_percent: 1, take_profit_percent: 2, max_daily_loss_usdc: 2 };
 const assets = ["BTC", "ETH", "SOL", "BNB", "XRP"];
@@ -29,13 +30,17 @@ export default function TradingDashboard() {
   const [message, setMessage] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [lastEvent, setLastEvent] = useState<BotEvent | null>(null);
+  const [chatInput, setChatInput] = useState("");
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
+    { id: 1, role: "bot", text: "Hei, sjef. Spør meg om status, resultat, siste handel eller hvorfor jeg ikke har handlet. Du kan også skrive «pause botten»." },
+  ]);
 
   const load = useCallback(async () => {
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) return;
     const [{ data: row, error }, { data: recent }, { data: events }] = await Promise.all([
       supabase.from("bot_settings").select("bot_enabled,live_trading_enabled,risk_profile,quote_asset,trade_cap_usdc,order_size_usdc,stop_loss_percent,take_profit_percent,max_daily_loss_usdc").eq("user_id", userData.user.id).maybeSingle(),
-      supabase.from("trades").select("id,symbol,side,quantity,entry_price,exit_price,pnl,created_at").order("created_at", { ascending: false }).limit(50),
+      supabase.from("trades").select("id,symbol,mode,side,quantity,entry_price,exit_price,pnl,created_at").order("created_at", { ascending: false }).limit(50),
       supabase.from("bot_events").select("id,level,event_type,message,created_at").order("created_at", { ascending: false }).limit(1),
     ]);
     if (error) setMessage(error.message);
@@ -98,6 +103,37 @@ export default function TradingDashboard() {
     setMessage("Nødstopp er lagret. Nye handler er blokkert."); setSaving(false);
   }
 
+  async function sendChat() {
+    const text = chatInput.trim();
+    if (!text) return;
+    const normalized = text.toLocaleLowerCase("nb-NO");
+    const nextId = Date.now();
+    setChatInput("");
+    setChatMessages((current) => [...current, { id: nextId, role: "boss", text }]);
+
+    let reply: string;
+    if (normalized.includes("pause") || normalized.includes("stopp")) {
+      await setLive(false);
+      reply = "Botten er pauset. Ingen nye handler kan åpnes før du aktiverer LIVE igjen med knappen over.";
+    } else if (normalized.includes("kjøp") || normalized.includes("selg") || normalized.includes("trade") || normalized.includes("handel nå")) {
+      reply = "Direkte kjøp og salg fra fritekst er sperret. Jeg handler bare når den godkjente strategien og tapsgrensene tillater det.";
+    } else if (normalized.includes("siste") && normalized.includes("handel")) {
+      const trade = trades[0];
+      reply = trade
+        ? `Siste handel: ${trade.side} ${trade.symbol}, ${Number(trade.quantity).toPrecision(6)} enheter, ${money(Number(trade.pnl ?? 0))} USDC realisert resultat.`
+        : "Det er ikke registrert noen handler ennå.";
+    } else if (normalized.includes("resultat") || normalized.includes("gevinst") || normalized.includes("tap")) {
+      reply = `Realisert totalresultat er ${money(stats.total)} USDC. Siste døgn: ${money(stats.day)} USDC. Estimerte gebyrer: ${money(stats.feesEstimate)} USDC.`;
+    } else if (normalized.includes("hvorfor") || normalized.includes("signal") || normalized.includes("analyse")) {
+      reply = lastEvent?.message ? `Siste analyse fra serveren: ${lastEvent.message}` : "Jeg har ikke mottatt et analysesignal fra serveren ennå.";
+    } else if (normalized.includes("status") || normalized.includes("live") || normalized.includes("aktiv")) {
+      reply = `${serverOnline ? "Serveren er online" : "Serverstatusen er ikke fersk"}. Trading er ${settings.live_trading_enabled ? "LIVE" : "PAUSET"}. Handelsrammen er ${money(settings.trade_cap_usdc)} USDC, og ordrestørrelsen er ${money(settings.order_size_usdc)} USDC.`;
+    } else {
+      reply = "Jeg kan svare om status, resultat, siste handel og siste analyse. Jeg kan også pause botten. Direkte kjøp/salg fra chat er sperret.";
+    }
+    setChatMessages((current) => [...current, { id: nextId + 1, role: "bot", text: reply }]);
+  }
+
   return <main className="shell">
     <header className="topbar"><div><span className="eyebrow">AI TRADING APP</span><h1>Kontrollpanel</h1></div><span className="pill"><i /> {serverOnline ? "Server online" : "Ingen fersk serverstatus"}</span></header>
     <section className="hero"><div><p className="eyebrow">BEGRENSET LIVE-RAMME</p><h2>100 USDC. Spot-only. Harde tapsgrenser.</h2><p className="muted">Binance-uttak, futures og giring er deaktivert.</p></div><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button></section>
@@ -122,6 +158,11 @@ export default function TradingDashboard() {
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">Historikk fra boten</span></div><div className="assets">{allocations.map(({ asset, invested, pnl }) => <div className="asset" key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b><small>Investert: {money(invested)} USDC</small></div><span className={pnl < 0 ? "loss" : "gain"}>{money(pnl)} USDC</span></div>)}</div></section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><span className="muted">Oppdateres hvert 30. sekund</span></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list">{trades.slice(0, 10).map((trade) => <div className="trade-row" key={trade.id}><b>{trade.side} {trade.symbol}</b><span>{Number(trade.quantity).toPrecision(6)}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{money(Number(trade.pnl ?? 0))} USDC</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>)}</div>}</section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">SERVERSTATUS</p><h3>Siste kontrollsignal</h3></div>{lastEvent && <time className="muted">{new Date(lastEvent.created_at).toLocaleString("nb-NO")}</time>}</div><p className={lastEvent?.level === "error" ? "loss" : "muted"}>{lastEvent?.message ?? "Serverrapportering er ikke koblet til ennå."}</p></section>
+    <section className="panel chat-panel"><div className="panel-head"><div><p className="eyebrow">SNAKK MED BOTTEN</p><h3>Du er sjefen</h3></div><span className="muted">Leser ferske kontrolldata</span></div>
+      <div className="chat-log" aria-live="polite">{chatMessages.map((item) => <div className={`chat-bubble ${item.role}`} key={item.id}><small>{item.role === "boss" ? "SJEFEN" : "BOTTEN"}</small><p>{item.text}</p></div>)}</div>
+      <form className="chat-form" onSubmit={(event) => { event.preventDefault(); void sendChat(); }}><input aria-label="Skriv til botten" value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder="F.eks. «Hva er status?»" /><button className="primary" type="submit">Send</button></form>
+      <p className="chat-note">Chatten kan lese status og pause botten. Direkte ordre fra fritekst er sperret.</p>
+    </section>
   </main>;
 }
 
