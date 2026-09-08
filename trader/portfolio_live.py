@@ -16,6 +16,8 @@ PROFILE_LIMITS = {"low": (6, 1800, 1), "normal": (16, 300, 3), "high": (80, 15, 
 SCALP_STOP_FRACTION = Decimal("0.0045")
 SCALP_TARGET_FRACTION = Decimal("0.0075")
 SCALP_MAX_HOLD_SECONDS = 900
+TRAILING_OCO_CEILING_FRACTION = Decimal("0.50")
+TRAILING_REFRESH_FRACTION = Decimal("0.001")
 
 
 @dataclass
@@ -31,6 +33,9 @@ class Position:
     stop_fraction: str | None = None
     target_fraction: str | None = None
     max_hold_seconds: int | None = None
+    peak_price: str | None = None
+    trailing_active: bool = False
+    trailing_stop_price: str | None = None
 
 
 @dataclass
@@ -135,17 +140,12 @@ def _today() -> str:
 
 def _position_from_raw(raw: dict[str, Any]) -> Position:
     return Position(
-        raw["symbol"],
-        raw["quantity"],
-        raw["entry_price"],
-        raw["quote_spent"],
-        int(raw["opened_at"]),
+        raw["symbol"], raw["quantity"], raw["entry_price"], raw["quote_spent"], int(raw["opened_at"]),
         raw.get("protective_order_list_id"),
         tuple(int(x) for x in raw.get("protective_order_ids", [])),
-        str(raw.get("strategy") or "swing"),
-        raw.get("stop_fraction"),
-        raw.get("target_fraction"),
+        str(raw.get("strategy") or "swing"), raw.get("stop_fraction"), raw.get("target_fraction"),
         int(raw["max_hold_seconds"]) if raw.get("max_hold_seconds") is not None else None,
+        raw.get("peak_price"), bool(raw.get("trailing_active", False)), raw.get("trailing_stop_price"),
     )
 
 
@@ -153,22 +153,14 @@ def load_state(path: Path) -> PortfolioState:
     if not path.exists():
         return PortfolioState(day=_today())
     raw = json.loads(path.read_text(encoding="utf-8"))
-    positions = (
-        [_position_from_raw(x) for x in raw.get("positions", [])]
-        if raw.get("positions") is not None
-        else ([_position_from_raw(raw["position"])] if raw.get("position") else [])
-    )
+    positions = ([_position_from_raw(x) for x in raw.get("positions", [])]
+                 if raw.get("positions") is not None
+                 else ([_position_from_raw(raw["position"])] if raw.get("position") else []))
     state = PortfolioState(
-        raw.get("day", _today()),
-        raw.get("realized_pnl", "0"),
-        int(raw.get("trades_today", 0)),
-        int(raw.get("cooldown_until", 0)),
-        positions,
-        raw.get("pending_action"),
-        raw.get("pending_client_order_id"),
-        int(raw.get("pending_since", 0)),
-        str(raw.get("pending_strategy") or "swing"),
-        raw.get("pending_stop_fraction"),
+        raw.get("day", _today()), raw.get("realized_pnl", "0"), int(raw.get("trades_today", 0)),
+        int(raw.get("cooldown_until", 0)), positions, raw.get("pending_action"),
+        raw.get("pending_client_order_id"), int(raw.get("pending_since", 0)),
+        str(raw.get("pending_strategy") or "swing"), raw.get("pending_stop_fraction"),
         raw.get("pending_target_fraction"),
         int(raw["pending_max_hold_seconds"]) if raw.get("pending_max_hold_seconds") is not None else None,
     )
@@ -247,20 +239,13 @@ def _protection_enabled() -> bool:
 
 
 def _position_limits(position: Position, limits: PortfolioLimits) -> tuple[Decimal, Decimal]:
-    stop = Decimal(position.stop_fraction) if position.stop_fraction is not None else limits.stop_fraction
-    target = Decimal(position.target_fraction) if position.target_fraction is not None else limits.target_fraction
-    return stop, target
+    return (
+        Decimal(position.stop_fraction) if position.stop_fraction is not None else limits.stop_fraction,
+        Decimal(position.target_fraction) if position.target_fraction is not None else limits.target_fraction,
+    )
 
 
-def _finalize_sell(
-    state: PortfolioState,
-    path: Path,
-    position: Position,
-    quantity: Decimal,
-    received: Decimal,
-    limits: PortfolioLimits,
-    report_trade: Callable[[dict[str, Any]], None] | None,
-) -> str:
+def _finalize_sell(state, path, position, quantity, received, limits, report_trade) -> str:
     if quantity <= 0 or received <= 0:
         raise BinanceError("Sell execution returned invalid quantity or proceeds")
     pnl = received - Decimal(position.quote_spent)
@@ -271,31 +256,17 @@ def _finalize_sell(
     state.cooldown_until = int(time.time()) + limits.cooldown_seconds
     save_state(path, state)
     if report_trade:
-        report_trade({
-            "symbol": position.symbol,
-            "side": "SELL",
-            "quantity": str(quantity),
-            "entry_price": position.entry_price,
-            "exit_price": str(received / quantity),
-            "pnl": str(pnl),
-        })
+        report_trade({"symbol": position.symbol, "side": "SELL", "quantity": str(quantity),
+                      "entry_price": position.entry_price, "exit_price": str(received / quantity), "pnl": str(pnl)})
     return f"sold:{position.symbol}:pnl={pnl};strategy={position.strategy}"
 
 
-def _install_protection(
-    client: BinanceSpotClient,
-    state: PortfolioState,
-    path: Path,
-    position: Position,
-    stop: Decimal,
-    target: Decimal,
-) -> str:
+def _install_protection(client, state, path, position, stop: Decimal, target: Decimal) -> str:
     quantity = _sellable_quantity(client, position.symbol, Decimal(position.quantity))
     if quantity <= 0:
         raise BinanceError("No sellable quantity available for protective OCO")
     response = client.place_protective_oco_sell(
-        symbol=position.symbol,
-        quantity=quantity,
+        symbol=position.symbol, quantity=quantity,
         target_price=_tick_price(client, position.symbol, target),
         stop_price=_tick_price(client, position.symbol, stop),
         live_trading_enabled=True,
@@ -309,14 +280,20 @@ def _install_protection(
     return f"protected:{position.symbol}:oco={position.protective_order_list_id}"
 
 
-def _check_protection(
-    client: BinanceSpotClient,
-    state: PortfolioState,
-    path: Path,
-    position: Position,
-    limits: PortfolioLimits,
-    report_trade,
-):
+def _cancel_protection(client, state, path, position: Position) -> bool:
+    if position.protective_order_list_id is None:
+        return True
+    try:
+        client.cancel_order_list(symbol=position.symbol, order_list_id=position.protective_order_list_id)
+    except BinanceError:
+        return False
+    position.protective_order_list_id = None
+    position.protective_order_ids = ()
+    save_state(path, state)
+    return True
+
+
+def _check_protection(client, state, path, position, limits, report_trade):
     if position.protective_order_list_id is None:
         return None
     try:
@@ -334,29 +311,15 @@ def _check_protection(
         except BinanceError:
             continue
         if order.get("status") == "FILLED":
-            return _finalize_sell(
-                state,
-                path,
-                position,
-                Decimal(str(order.get("executedQty", "0"))),
-                Decimal(str(order.get("cummulativeQuoteQty", "0"))),
-                limits,
-                report_trade,
-            )
+            return _finalize_sell(state, path, position, Decimal(str(order.get("executedQty", "0"))),
+                                  Decimal(str(order.get("cummulativeQuoteQty", "0"))), limits, report_trade)
     position.protective_order_list_id = None
     position.protective_order_ids = ()
     save_state(path, state)
     return None
 
 
-def _reconcile(
-    client: BinanceSpotClient,
-    state: PortfolioState,
-    path: Path,
-    quote: str,
-    limits: PortfolioLimits,
-    report_trade,
-):
+def _reconcile(client, state, path, quote, limits, report_trade):
     if not state.pending_action:
         return None
     if not state.pending_client_order_id:
@@ -366,17 +329,13 @@ def _reconcile(
         order = client.query_order(symbol=symbol, orig_client_order_id=state.pending_client_order_id)
     except BinanceError as exc:
         if "-2013" in str(exc) and state.pending_since and int(time.time()) - state.pending_since >= 60:
-            _clear_pending(state)
-            save_state(path, state)
-            return "reconciled_missing_order"
+            _clear_pending(state); save_state(path, state); return "reconciled_missing_order"
         return f"paused_pending_reconciliation:{state.pending_action}"
     status = str(order.get("status", ""))
     if status not in {"FILLED", "CANCELED", "EXPIRED", "REJECTED"}:
         return f"pending_exchange_order:{side}:{status or 'UNKNOWN'}"
     if status != "FILLED":
-        _clear_pending(state)
-        save_state(path, state)
-        return f"reconciled_{status.lower()}:{side}:{symbol}"
+        _clear_pending(state); save_state(path, state); return f"reconciled_{status.lower()}:{side}:{symbol}"
     executed = Decimal(str(order.get("executedQty", "0")))
     quote_qty = Decimal(str(order.get("cummulativeQuoteQty", "0")))
     now = int(time.time())
@@ -385,34 +344,41 @@ def _reconcile(
             return f"paused_pending_reconciliation:{state.pending_action}"
         available = _free_balance(client, symbol.removesuffix(quote))
         quantity = min(executed, available) if available > 0 else executed
-        strategy = state.pending_strategy
-        stop_fraction = state.pending_stop_fraction
-        target_fraction = state.pending_target_fraction
-        max_hold = state.pending_max_hold_seconds
-        opened_at = state.pending_since or now
         if _find(state, symbol) is None:
             state.positions.append(Position(
-                symbol,
-                str(quantity),
-                str(quote_qty / executed),
-                str(quote_qty),
-                opened_at,
-                strategy=strategy,
-                stop_fraction=stop_fraction,
-                target_fraction=target_fraction,
-                max_hold_seconds=max_hold,
+                symbol, str(quantity), str(quote_qty / executed), str(quote_qty), state.pending_since or now,
+                strategy=state.pending_strategy, stop_fraction=state.pending_stop_fraction,
+                target_fraction=state.pending_target_fraction, max_hold_seconds=state.pending_max_hold_seconds,
+                peak_price=str(quote_qty / executed),
             ))
         state.trades_today += 1
-        _clear_pending(state)
-        save_state(path, state)
+        strategy = state.pending_strategy
+        _clear_pending(state); save_state(path, state)
         if report_trade:
-            report_trade({"symbol": symbol, "side": "BUY", "quantity": str(quantity), "entry_price": str(quote_qty / executed), "exit_price": None, "pnl": None})
+            report_trade({"symbol": symbol, "side": "BUY", "quantity": str(quantity),
+                          "entry_price": str(quote_qty / executed), "exit_price": None, "pnl": None})
         return f"reconciled_buy:{symbol};strategy={strategy}"
     if side == "SELL":
         position = _find(state, symbol)
         if position:
             return _finalize_sell(state, path, position, executed, quote_qty, limits, report_trade)
     return f"paused_pending_reconciliation:{state.pending_action}"
+
+
+def _market_sell(client, state, state_path, position, limits, report_trade, now: int, reason: str) -> str:
+    quantity = _sellable_quantity(client, position.symbol, Decimal(position.quantity))
+    if quantity <= 0:
+        return f"unsellable:{position.symbol}"
+    client_id = _client_id("SELL", position.symbol, now)
+    state.pending_action = f"SELL:{position.symbol}"
+    state.pending_client_order_id = client_id
+    state.pending_since = now
+    save_state(state_path, state)
+    order = client.place_spot_order(symbol=position.symbol, side="SELL", order_type="MARKET", quantity=quantity,
+                                    live_trading_enabled=True, client_order_id=client_id)
+    result = _finalize_sell(state, state_path, position, quantity,
+                            Decimal(str(order.get("cummulativeQuoteQty", "0"))), limits, report_trade)
+    return f"{result};reason={reason}"
 
 
 def run_portfolio_cycle(
@@ -435,73 +401,82 @@ def run_portfolio_cycle(
 
     notes: list[str] = []
     for position in list(state.positions or []):
-        expired_scalp = (
-            position.strategy == "scalp"
-            and position.max_hold_seconds is not None
-            and now - position.opened_at >= position.max_hold_seconds
-        )
-        if expired_scalp and position.protective_order_list_id is not None:
-            try:
-                client.cancel_order_list(symbol=position.symbol, order_list_id=position.protective_order_list_id)
-                position.protective_order_list_id = None
-                position.protective_order_ids = ()
-                save_state(state_path, state)
-            except BinanceError:
+        expired_scalp = position.strategy == "scalp" and position.max_hold_seconds is not None and now - position.opened_at >= position.max_hold_seconds
+        if expired_scalp:
+            if not _cancel_protection(client, state, state_path, position):
                 notes.append(f"scalp_expiry_cancel_failed:{position.symbol}")
                 continue
+            return _market_sell(client, state, state_path, position, limits, report_trade, now, "timeout")
 
-        if not expired_scalp:
-            checked = _check_protection(client, state, state_path, position, limits, report_trade)
-            if checked and checked.startswith("sold:"):
-                return checked
-            if checked:
-                notes.append(checked)
-                continue
+        checked = _check_protection(client, state, state_path, position, limits, report_trade)
+        if checked and checked.startswith("sold:"):
+            return checked
+        if checked and checked.startswith("protected_status_unavailable:"):
+            notes.append(checked)
+            continue
 
         current = client.ticker_price(position.symbol)
         entry = Decimal(position.entry_price)
-        stop_fraction, target_fraction = _position_limits(position, limits)
-        stop = entry * (Decimal("1") - stop_fraction)
-        target = entry * (Decimal("1") + target_fraction)
+        stop_fraction, activation_fraction = _position_limits(position, limits)
+        hard_stop = entry * (Decimal("1") - stop_fraction)
+        activation = entry * (Decimal("1") + activation_fraction)
+        peak = Decimal(position.peak_price) if position.peak_price is not None else entry
 
-        if not expired_scalp and stop < current < target and _protection_enabled():
+        if not position.trailing_active and current >= activation:
+            if position.protective_order_list_id is not None and not _cancel_protection(client, state, state_path, position):
+                notes.append(f"trailing_activation_cancel_failed:{position.symbol}")
+                continue
+            position.trailing_active = True
+            peak = max(peak, current)
+            position.peak_price = str(peak)
+            trailing_stop = peak * (Decimal("1") - stop_fraction)
+            position.trailing_stop_price = str(trailing_stop)
+            save_state(state_path, state)
+            if _protection_enabled():
+                ceiling = peak * (Decimal("1") + TRAILING_OCO_CEILING_FRACTION)
+                try:
+                    _install_protection(client, state, state_path, position, trailing_stop, ceiling)
+                except BinanceError:
+                    notes.append(f"trailing_unprotected:{position.symbol}")
+            notes.append(f"trailing_active:{position.symbol}:peak={peak}:stop={trailing_stop}")
+            continue
+
+        if position.trailing_active:
+            old_stop = Decimal(position.trailing_stop_price) if position.trailing_stop_price else peak * (Decimal("1") - stop_fraction)
+            if current > peak:
+                new_peak = current
+                new_stop = new_peak * (Decimal("1") - stop_fraction)
+                position.peak_price = str(new_peak)
+                position.trailing_stop_price = str(new_stop)
+                save_state(state_path, state)
+                if new_stop >= old_stop * (Decimal("1") + TRAILING_REFRESH_FRACTION) and _protection_enabled():
+                    if position.protective_order_list_id is not None and not _cancel_protection(client, state, state_path, position):
+                        notes.append(f"trailing_refresh_cancel_failed:{position.symbol}")
+                        continue
+                    ceiling = new_peak * (Decimal("1") + TRAILING_OCO_CEILING_FRACTION)
+                    try:
+                        _install_protection(client, state, state_path, position, new_stop, ceiling)
+                    except BinanceError:
+                        notes.append(f"trailing_unprotected:{position.symbol}")
+                notes.append(f"trailing_raise:{position.symbol}:peak={new_peak}:stop={new_stop}")
+                continue
+            trailing_stop = Decimal(position.trailing_stop_price or old_stop)
+            if current <= trailing_stop and position.protective_order_list_id is None:
+                return _market_sell(client, state, state_path, position, limits, report_trade, now, "trailing_stop")
+            notes.append(f"trailing_hold:{position.symbol}:peak={peak}:stop={trailing_stop}")
+            continue
+
+        if current <= hard_stop and position.protective_order_list_id is None:
+            return _market_sell(client, state, state_path, position, limits, report_trade, now, "hard_stop")
+
+        if position.protective_order_list_id is None and _protection_enabled():
+            ceiling = entry * (Decimal("1") + TRAILING_OCO_CEILING_FRACTION)
             try:
-                notes.append(_install_protection(client, state, state_path, position, stop, target))
+                notes.append(_install_protection(client, state, state_path, position, hard_stop, ceiling))
             except BinanceError:
                 notes.append(f"holding_unprotected:{position.symbol}")
             continue
-        if not expired_scalp and stop < current < target:
-            notes.append(f"holding:{position.symbol}")
-            continue
-
-        quantity = _sellable_quantity(client, position.symbol, Decimal(position.quantity))
-        if quantity <= 0:
-            notes.append(f"unsellable:{position.symbol}")
-            continue
-        client_id = _client_id("SELL", position.symbol, now)
-        state.pending_action = f"SELL:{position.symbol}"
-        state.pending_client_order_id = client_id
-        state.pending_since = now
-        save_state(state_path, state)
-        order = client.place_spot_order(
-            symbol=position.symbol,
-            side="SELL",
-            order_type="MARKET",
-            quantity=quantity,
-            live_trading_enabled=True,
-            client_order_id=client_id,
-        )
-        reason = "timeout" if expired_scalp else "price_exit"
-        result = _finalize_sell(
-            state,
-            state_path,
-            position,
-            quantity,
-            Decimal(str(order.get("cummulativeQuoteQty", "0"))),
-            limits,
-            report_trade,
-        )
-        return f"{result};reason={reason}"
+        notes.append(f"holding:{position.symbol}")
 
     if not allow_new_entries:
         return "paused_new_entries" if not notes else ";".join(notes)
@@ -527,13 +502,9 @@ def run_portfolio_cycle(
         raise BinanceError(f"Signal symbol {symbol} does not match quote asset {quote}")
     strategy = (entry_strategies or {}).get(symbol, "swing")
     if strategy == "scalp":
-        stop_fraction = SCALP_STOP_FRACTION
-        target_fraction = SCALP_TARGET_FRACTION
-        max_hold = SCALP_MAX_HOLD_SECONDS
+        stop_fraction, activation_fraction, max_hold = SCALP_STOP_FRACTION, SCALP_TARGET_FRACTION, SCALP_MAX_HOLD_SECONDS
     else:
-        stop_fraction = limits.stop_fraction
-        target_fraction = limits.target_fraction
-        max_hold = None
+        stop_fraction, activation_fraction, max_hold = limits.stop_fraction, limits.target_fraction, None
 
     spend = min(limits.order_size, free_quote)
     client.test_market_buy(symbol=symbol, quote_quantity=spend)
@@ -543,16 +514,11 @@ def run_portfolio_cycle(
     state.pending_since = now
     state.pending_strategy = strategy
     state.pending_stop_fraction = str(stop_fraction)
-    state.pending_target_fraction = str(target_fraction)
+    state.pending_target_fraction = str(activation_fraction)
     state.pending_max_hold_seconds = max_hold
     save_state(state_path, state)
 
-    order = client.market_buy_by_quote(
-        symbol=symbol,
-        quote_quantity=spend,
-        live_trading_enabled=True,
-        client_order_id=client_id,
-    )
+    order = client.market_buy_by_quote(symbol=symbol, quote_quantity=spend, live_trading_enabled=True, client_order_id=client_id)
     spent = Decimal(str(order.get("cummulativeQuoteQty", "0")))
     executed = Decimal(str(order.get("executedQty", "0")))
     if spent <= 0 or executed <= 0:
@@ -561,32 +527,24 @@ def run_portfolio_cycle(
     if net <= 0:
         raise BinanceError("Live buy returned no net acquired quantity")
 
-    position = Position(
-        symbol,
-        str(net),
-        str(spent / executed),
-        str(spent),
-        now,
-        strategy=strategy,
-        stop_fraction=str(stop_fraction),
-        target_fraction=str(target_fraction),
-        max_hold_seconds=max_hold,
-    )
+    entry = spent / executed
+    position = Position(symbol, str(net), str(entry), str(spent), now, strategy=strategy,
+                        stop_fraction=str(stop_fraction), target_fraction=str(activation_fraction),
+                        max_hold_seconds=max_hold, peak_price=str(entry))
     state.positions.append(position)
     _clear_pending(state)
     state.trades_today += 1
     state.cooldown_until = now + limits.cooldown_seconds
     save_state(state_path, state)
     if report_trade:
-        report_trade({"symbol": symbol, "side": "BUY", "quantity": str(net), "entry_price": str(spent / executed), "exit_price": None, "pnl": None})
+        report_trade({"symbol": symbol, "side": "BUY", "quantity": str(net), "entry_price": str(entry), "exit_price": None, "pnl": None})
 
     if _protection_enabled():
-        entry = Decimal(position.entry_price)
-        stop = entry * (Decimal("1") - stop_fraction)
-        target = entry * (Decimal("1") + target_fraction)
+        hard_stop = entry * (Decimal("1") - stop_fraction)
+        ceiling = entry * (Decimal("1") + TRAILING_OCO_CEILING_FRACTION)
         try:
-            protection = _install_protection(client, state, state_path, position, stop, target)
-            return f"bought:{symbol}:spent={spent};strategy={strategy};{protection};open={len(state.positions)}"
+            protection = _install_protection(client, state, state_path, position, hard_stop, ceiling)
+            return f"bought:{symbol}:spent={spent};strategy={strategy};trailing_at={activation_fraction};{protection};open={len(state.positions)}"
         except BinanceError:
-            return f"bought:{symbol}:spent={spent};strategy={strategy};protection=pending;open={len(state.positions)}"
-    return f"bought:{symbol}:spent={spent};strategy={strategy};open={len(state.positions)}"
+            return f"bought:{symbol}:spent={spent};strategy={strategy};trailing_at={activation_fraction};protection=pending;open={len(state.positions)}"
+    return f"bought:{symbol}:spent={spent};strategy={strategy};trailing_at={activation_fraction};open={len(state.positions)}"
