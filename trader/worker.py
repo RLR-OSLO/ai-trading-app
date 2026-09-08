@@ -44,11 +44,12 @@ def build_client() -> BinanceSpotClient:
     )
 
 
-def readiness_check(client: BinanceSpotClient, pairs: tuple[str, ...]) -> bool:
+def readiness_check(client: BinanceSpotClient, pairs: tuple[str, ...] | None = None) -> bool:
+    active_pairs = pairs or configured_pairs()
     client.server_time()
-    info = client.exchange_info(pairs)
+    info = client.exchange_info(active_pairs)
     available = {item["symbol"] for item in info.get("symbols", [])}
-    missing = set(pairs) - available
+    missing = set(active_pairs) - available
     if missing:
         raise BinanceError(f"Approved pairs unavailable: {sorted(missing)}")
     if client.credentials is not None:
