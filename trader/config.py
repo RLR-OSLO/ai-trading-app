@@ -29,4 +29,3 @@ DEFAULT_CONFIG = TradingConfig(
     weekly_profit_lock=Decimal("0.25"),
     max_open_positions=3,
 )
-

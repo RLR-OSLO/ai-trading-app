@@ -6,16 +6,22 @@ import time
 from decimal import Decimal
 from pathlib import Path
 
-from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
 from .analysis import MarketAnalysis, analyze_market, bullish_btc_regime
+from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
 from .config import DEFAULT_CONFIG
-from .live import LiveLimits, run_live_cycle
 from .news import NewsMonitor
+from .portfolio_live import PortfolioLimits, run_portfolio_cycle
 from .reporting import SupabaseReporter
 
 
 LOG = logging.getLogger("ai_trader")
-RISK_THRESHOLDS = {"low": 7, "normal": 6, "high": 5}
+RISK_THRESHOLDS = {"low": 7, "normal": 6, "high": 4}
+ACTIVE_MARKET_COUNT = 20
+MARKET_UNIVERSE = (
+    "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LINK",
+    "SUI", "XLM", "BCH", "LTC", "DOT", "SHIB", "TON", "HBAR", "UNI", "AAVE",
+    "NEAR", "APT", "ETC", "FIL", "ICP", "ATOM", "ALGO", "VET", "POL", "ARB",
+)
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -45,14 +51,40 @@ def build_client() -> BinanceSpotClient:
     )
 
 
+def active_pairs(client: BinanceSpotClient, quote_asset: str) -> tuple[str, ...]:
+    if quote_asset not in DEFAULT_CONFIG.preferred_quote_assets:
+        raise ValueError("Quote asset is outside the approved allowlist")
+    requested = {f"{asset}{quote_asset}" for asset in MARKET_UNIVERSE}
+    exchange_info = client._request("GET", "/api/v3/exchangeInfo")
+    available = {
+        item.get("symbol")
+        for item in exchange_info.get("symbols", [])
+        if item.get("symbol") in requested
+        and item.get("status") == "TRADING"
+        and item.get("quoteAsset") == quote_asset
+        and item.get("isSpotTradingAllowed", True)
+    }
+    tickers = client._request("GET", "/api/v3/ticker/24hr")
+    quote_volume = {
+        item.get("symbol"): Decimal(str(item.get("quoteVolume", "0")))
+        for item in tickers
+        if item.get("symbol") in available
+    }
+    ordered = sorted(available, key=lambda symbol: quote_volume.get(symbol, Decimal("0")), reverse=True)
+    selected = tuple(ordered[:ACTIVE_MARKET_COUNT])
+    if not selected:
+        raise BinanceError(f"No approved {quote_asset} spot pairs are currently available")
+    return selected
+
+
 def readiness_check(client: BinanceSpotClient, pairs: tuple[str, ...] | None = None) -> bool:
-    active_pairs = pairs or configured_pairs()
     client.server_time()
-    info = client.exchange_info(active_pairs)
-    available = {item["symbol"] for item in info.get("symbols", [])}
-    missing = set(active_pairs) - available
-    if missing:
-        raise BinanceError(f"Approved pairs unavailable: {sorted(missing)}")
+    if pairs:
+        info = client.exchange_info(pairs)
+        available = {item["symbol"] for item in info.get("symbols", [])}
+        missing = set(pairs) - available
+        if missing:
+            raise BinanceError(f"Approved pairs unavailable: {sorted(missing)}")
     if client.credentials is not None:
         client.account()
         return True
@@ -76,7 +108,8 @@ def market_scan(
         pair: {interval: client.klines(pair, interval, limit=101)[:-1] for interval in ("15m", "1h", "4h")}
         for pair in pairs
     }
-    btc_regime = bullish_btc_regime(frames[pairs[0]])
+    btc_pair = next((pair for pair in pairs if pair.startswith("BTC")), pairs[0])
+    btc_regime = bullish_btc_regime(frames[btc_pair])
     news = news_monitor.score()
     analyses = {pair: analyze_market(data) for pair, data in frames.items()}
     ordered = sorted(analyses, key=lambda pair: analyses[pair].score, reverse=True)
@@ -112,14 +145,15 @@ def main() -> None:
             settings = reporter.get_settings() if reporter else None
             quote_asset = str((settings or {}).get("quote_asset") or os.getenv("TRADING_QUOTE_ASSET", "USDC")).upper()
             risk_profile = str((settings or {}).get("risk_profile") or "normal").lower()
-            pairs = configured_pairs(quote_asset)
-            authenticated = readiness_check(client, pairs)
+            authenticated = readiness_check(client)
+            pairs = active_pairs(client, quote_asset)
             available_balance = free_quote_balance(client, quote_asset) if authenticated else Decimal("0")
             LOG.info(
-                "health check passed; authenticated_account_read=%s; available_%s=%s",
+                "health check passed; authenticated_account_read=%s; available_%s=%s; active_pairs=%s",
                 authenticated,
                 quote_asset.lower(),
                 available_balance,
+                ",".join(pairs),
             )
 
             signals, analyses, context = market_scan(client, news_monitor, pairs, risk_profile)
@@ -140,18 +174,18 @@ def main() -> None:
                 reporter.record_event(
                     "heartbeat",
                     f"live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
-                    f"signals={signal_text};scores={score_text};prices={price_text};best={best_pair}:{best.score};"
-                    f"reasons={','.join(best.reasons)}",
+                    f"signals={signal_text};scores={score_text};prices={price_text};markets={','.join(pairs)};"
+                    f"best={best_pair}:{best.score};reasons={','.join(best.reasons)}",
                 )
                 last_heartbeat = time.time()
 
             runtime_settings = dict(settings or {})
             runtime_settings["trade_cap_usdc"] = str(max(available_balance, Decimal("5")))
-            result = run_live_cycle(
+            result = run_portfolio_cycle(
                 client,
                 signals,
                 state_path,
-                LiveLimits.from_settings(runtime_settings) if settings else LiveLimits.from_env(),
+                PortfolioLimits.from_settings(runtime_settings) if settings else PortfolioLimits.from_env(),
                 reporter.record_trade if reporter else None,
                 allow_new_entries=allow_new_entries,
                 quote_asset=quote_asset,
