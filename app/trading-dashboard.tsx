@@ -22,6 +22,7 @@ type ChatMessage = { id: number; role: "boss" | "bot"; text: string };
 const defaults: Settings = { bot_enabled: false, live_trading_enabled: false, risk_profile: "normal", quote_asset: "USDC", trade_cap_usdc: 100, order_size_usdc: 25, stop_loss_percent: 1, take_profit_percent: 2, max_daily_loss_usdc: 2 };
 const assets = ["BTC", "ETH", "SOL", "BNB", "XRP"];
 const money = (value: number) => new Intl.NumberFormat("nb-NO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
+const crypto = (value: number) => new Intl.NumberFormat("nb-NO", { maximumFractionDigits: 8 }).format(value);
 
 export default function TradingDashboard() {
   const [settings, setSettings] = useState<Settings>(defaults);
@@ -61,15 +62,32 @@ export default function TradingDashboard() {
     return { total: pnl(0), day: pnl(now - 86_400_000), hour: pnl(now - 3_600_000), won, lost, feesEstimate };
   }, [trades]);
 
+  const marketPrices = useMemo(() => {
+    const prices = new Map<string, number>();
+    const match = lastEvent?.message.match(/(?:^|;)prices=([^;]+)/);
+    if (!match) return prices;
+    for (const item of match[1].split(",")) {
+      const [symbol, rawPrice] = item.split(":");
+      const value = Number(rawPrice);
+      if (symbol && Number.isFinite(value)) prices.set(symbol, value);
+    }
+    return prices;
+  }, [lastEvent]);
+
   const allocations = useMemo(() => assets.map((asset) => {
     const symbol = `${asset}${settings.quote_asset}`;
-    const invested = trades.filter((trade) => trade.symbol === symbol).reduce((sum, trade) => {
+    const assetTrades = trades.filter((trade) => trade.symbol === symbol);
+    const invested = assetTrades.reduce((sum, trade) => {
       const cost = Number(trade.quantity) * Number(trade.entry_price ?? 0);
       return Math.max(0, sum + (trade.side === "BUY" ? cost : -cost));
     }, 0);
-    const pnl = trades.filter((trade) => trade.symbol === symbol).reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
-    return { asset, invested, pnl };
-  }), [settings.quote_asset, trades]);
+    const quantity = Math.max(0, assetTrades.reduce((sum, trade) => sum + (trade.side === "BUY" ? Number(trade.quantity) : -Number(trade.quantity)), 0));
+    const pnl = assetTrades.reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
+    const currentPrice = marketPrices.get(symbol) ?? null;
+    const currentValue = currentPrice === null ? null : quantity * currentPrice;
+    const unrealized = currentValue === null ? null : currentValue - invested;
+    return { asset, invested, quantity, pnl, currentPrice, currentValue, unrealized };
+  }), [settings.quote_asset, trades, marketPrices]);
 
   const availableCapital = useMemo(() => {
     const match = lastEvent?.message.match(/(?:^|;)available=([0-9.]+)/);
@@ -171,7 +189,7 @@ export default function TradingDashboard() {
         <label className="select-field"><span>Risikonivå</span><select value={settings.risk_profile} onChange={(event) => update("risk_profile", event.target.value as Settings["risk_profile"])}><option value="low">Lav</option><option value="normal">Normal</option><option value="high">Høy</option></select></label>
       </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button></div>{message && <p className="inline-message">{message}</p>}
     </section>
-    <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">Historikk fra boten</span></div><div className="assets">{allocations.map(({ asset, invested, pnl }) => <div className="asset" key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b><small>Investert: {money(invested)} {settings.quote_asset}</small></div><span className={pnl < 0 ? "loss" : "gain"}>{money(pnl)} {settings.quote_asset}</span></div>)}</div></section>
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">Live-priser oppdateres ca. hvert 30. sekund</span></div><div className="assets">{allocations.map(({ asset, invested, quantity, pnl, currentPrice, currentValue, unrealized }) => <div className="asset" key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b><small>Investert: {money(invested)} {settings.quote_asset} · Eier: {crypto(quantity)} {asset}</small><small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`} · Verdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`}</small></div><span className={(unrealized ?? pnl) < 0 ? "loss" : "gain"}>{unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>)}</div></section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><span className="muted">Oppdateres hvert 30. sekund</span></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list">{trades.slice(0, 10).map((trade) => <div className="trade-row" key={trade.id}><b>{trade.side} {trade.symbol}</b><span>{Number(trade.quantity).toPrecision(6)}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{money(Number(trade.pnl ?? 0))} {settings.quote_asset}</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>)}</div>}</section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">SERVERSTATUS</p><h3>Siste kontrollsignal</h3></div>{lastEvent && <time className="muted">{new Date(lastEvent.created_at).toLocaleString("nb-NO")}</time>}</div><p className={lastEvent?.level === "error" ? "loss" : "muted"}>{lastEvent?.message ?? "Serverrapportering er ikke koblet til ennå."}</p></section>
     <section className="panel chat-panel"><div className="panel-head"><div><p className="eyebrow">SNAKK MED BOTTEN</p><h3>Du er sjefen</h3></div><span className="muted">Leser ferske kontrolldata</span></div>

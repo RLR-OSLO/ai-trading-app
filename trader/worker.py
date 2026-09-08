@@ -133,13 +133,14 @@ def main() -> None:
             )
             allow_new_entries = master_live and dashboard_live
 
-            if reporter and time.time() - last_heartbeat >= 120:
+            if reporter and time.time() - last_heartbeat >= 30:
                 best_pair = max(analyses, key=lambda pair: analyses[pair].score)
                 best = analyses[best_pair]
+                price_text = ",".join(f"{pair}:{client.ticker_price(pair)}" for pair in pairs)
                 reporter.record_event(
                     "heartbeat",
                     f"live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
-                    f"signals={signal_text};scores={score_text};best={best_pair}:{best.score};"
+                    f"signals={signal_text};scores={score_text};prices={price_text};best={best_pair}:{best.score};"
                     f"reasons={','.join(best.reasons)}",
                 )
                 last_heartbeat = time.time()
