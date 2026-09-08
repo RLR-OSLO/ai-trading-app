@@ -125,6 +125,22 @@ class BinanceSpotClient:
             signed=True,
         )
 
+    def query_order_by_id(self, *, symbol: str, order_id: int) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            "/api/v3/order",
+            {"symbol": symbol, "orderId": order_id},
+            signed=True,
+        )
+
+    def query_order_list(self, *, order_list_id: int) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            "/api/v3/orderList",
+            {"orderListId": order_list_id},
+            signed=True,
+        )
+
     def test_market_buy(self, *, symbol: str, quote_quantity: Decimal) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -153,6 +169,34 @@ class BinanceSpotClient:
         if client_order_id:
             params["newClientOrderId"] = client_order_id
         return self._request("POST", "/api/v3/order", params, signed=True)
+
+    def place_protective_oco_sell(
+        self,
+        *,
+        symbol: str,
+        quantity: Decimal,
+        target_price: Decimal,
+        stop_price: Decimal,
+        live_trading_enabled: bool,
+        list_client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not live_trading_enabled:
+            raise BinanceError("Live trading safety lock is disabled")
+        if quantity <= 0 or target_price <= 0 or stop_price <= 0:
+            raise ValueError("Protective OCO values must be positive")
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "side": "SELL",
+            "quantity": format(quantity, "f"),
+            "aboveType": "LIMIT_MAKER",
+            "abovePrice": format(target_price, "f"),
+            "belowType": "STOP_LOSS",
+            "belowStopPrice": format(stop_price, "f"),
+            "newOrderRespType": "FULL",
+        }
+        if list_client_order_id:
+            params["listClientOrderId"] = list_client_order_id
+        return self._request("POST", "/api/v3/orderList/oco", params, signed=True)
 
     def place_spot_order(
         self,
