@@ -530,6 +530,10 @@ def run_portfolio_cycle(
     allow_new_entries: bool = True,
     quote_asset: str = "USDC",
     entry_strategies: dict[str, str] | None = None,
+    entry_stop_fractions: dict[str, Decimal] | None = None,
+    entry_target_fractions: dict[str, Decimal] | None = None,
+    entry_size_multipliers: dict[str, Decimal] | None = None,
+    entry_max_hold_seconds: dict[str, int] | None = None,
 ) -> str:
     state = load_state(state_path)
     now = int(time.time())
@@ -657,9 +661,15 @@ def run_portfolio_cycle(
     if strategy == "scalp":
         stop_fraction, activation_fraction, max_hold = SCALP_STOP_FRACTION, SCALP_TARGET_FRACTION, SCALP_MAX_HOLD_SECONDS
     else:
-        stop_fraction, activation_fraction, max_hold = limits.stop_fraction, limits.target_fraction, None
+        stop_fraction = (entry_stop_fractions or {}).get(symbol, limits.stop_fraction)
+        activation_fraction = (entry_target_fractions or {}).get(symbol, limits.target_fraction)
+        max_hold = (entry_max_hold_seconds or {}).get(symbol)
 
-    spend = min(limits.order_size, free_quote)
+    multiplier = max(Decimal("0.5"), min(Decimal("1.5"), Decimal(str((entry_size_multipliers or {}).get(symbol, Decimal("1"))))))
+    max_fraction_of_free = Decimal("0.35")
+    spend = min(limits.order_size * multiplier, free_quote * max_fraction_of_free, free_quote)
+    if spend < Decimal("5"):
+        return f"insufficient_{quote.lower()}_for_sized_entry"
     client.test_market_buy(symbol=symbol, quote_quantity=spend)
     client_id = _client_id("BUY", symbol, now)
     state.pending_action = f"BUY:{symbol}"
