@@ -120,9 +120,9 @@ class PortfolioLiveTests(unittest.TestCase):
         position = state.positions[0]
         self.assertIn("strategy=scalp", result)
         self.assertEqual(position.strategy, "scalp")
-        self.assertEqual(position.stop_fraction, "0.0075")
-        self.assertEqual(position.target_fraction, "0.0060")
-        self.assertEqual(position.max_hold_seconds, 1800)
+        self.assertEqual(position.stop_fraction, "0.0060")
+        self.assertEqual(position.target_fraction, "0.0080")
+        self.assertEqual(position.max_hold_seconds, 2700)
         self.assertEqual(client.oco_orders, 1)
 
     def test_target_becomes_trailing_activation_and_profit_can_run(self):
@@ -177,13 +177,55 @@ class PortfolioLiveTests(unittest.TestCase):
                 entry_strategies={"BTCUSDC": "scalp"},
             )
             state = load_state(path)
-            state.positions[0].opened_at = int(__import__("time").time()) - 1900
+            state.positions[0].opened_at = int(__import__("time").time()) - 2800
             state.cooldown_until = 0
             save_state(path, state)
-            client.price = Decimal("100.30")
+            client.price = Decimal("100.45")
             result = run_portfolio_cycle(client, {"BTCUSDC": False}, path, self.limits())
         self.assertIn("reason=timeout_profit", result)
         self.assertEqual(client.cancelled_oco, 1)
+        self.assertEqual(client.live_sells, 1)
+
+    def test_expired_scalp_does_not_force_sell_material_loss(self):
+        client = FakeClient()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            run_portfolio_cycle(
+                client,
+                {"BTCUSDC": True},
+                path,
+                self.limits(),
+                entry_strategies={"BTCUSDC": "scalp"},
+            )
+            state = load_state(path)
+            state.positions[0].opened_at = int(__import__("time").time()) - 5600
+            state.cooldown_until = 0
+            save_state(path, state)
+            client.price = Decimal("99.50")
+            result = run_portfolio_cycle(client, {"BTCUSDC": False}, path, self.limits())
+            final = load_state(path)
+        self.assertEqual(client.live_sells, 0)
+        self.assertEqual(len(final.positions), 1)
+        self.assertIn("holding:BTCUSDC", result)
+
+    def test_expired_scalp_can_exit_small_loss_after_signal_disappears(self):
+        client = FakeClient()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            run_portfolio_cycle(
+                client,
+                {"BTCUSDC": True},
+                path,
+                self.limits(),
+                entry_strategies={"BTCUSDC": "scalp"},
+            )
+            state = load_state(path)
+            state.positions[0].opened_at = int(__import__("time").time()) - 5600
+            state.cooldown_until = 0
+            save_state(path, state)
+            client.price = Decimal("99.80")
+            result = run_portfolio_cycle(client, {"BTCUSDC": False}, path, self.limits())
+        self.assertIn("reason=signal_timeout", result)
         self.assertEqual(client.live_sells, 1)
 
     def test_high_profile_is_aggressive_but_bounded(self):

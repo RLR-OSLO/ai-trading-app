@@ -13,14 +13,16 @@ from typing import Any, Callable
 from .binance import BinanceError, BinanceSpotClient
 
 PROFILE_LIMITS = {"low": (6, 1800, 1), "normal": (12, 300, 3), "high": (36, 90, 4)}
-SCALP_STOP_FRACTION = Decimal("0.0075")
-SCALP_TARGET_FRACTION = Decimal("0.0060")
-SCALP_MAX_HOLD_SECONDS = 1800
+SCALP_STOP_FRACTION = Decimal("0.0060")
+SCALP_TARGET_FRACTION = Decimal("0.0080")
+SCALP_MAX_HOLD_SECONDS = 2700
 TRAILING_OCO_CEILING_FRACTION = Decimal("0.50")
 TRAILING_REFRESH_FRACTION = Decimal("0.001")
 TRAILING_GAP_RATIO = Decimal("0.45")
 TRAILING_MIN_GAP_FRACTION = Decimal("0.0025")
-SCALP_TIMEOUT_PROFIT_FRACTION = Decimal("0.0025")
+SCALP_TIMEOUT_PROFIT_FRACTION = Decimal("0.0040")
+SCALP_TIMEOUT_MAX_LOSS_FRACTION = Decimal("0.0030")
+SCALP_BREAKEVEN_LOCK_FRACTION = Decimal("0.0035")
 
 
 @dataclass
@@ -575,11 +577,19 @@ def run_portfolio_cycle(
                     notes.append(f"scalp_profit_timeout_cancel_failed:{position.symbol}")
                     continue
                 return _market_sell(client, state, state_path, position, limits, report_trade, now, "timeout_profit")
-            if age >= position.max_hold_seconds * 2:
+            # Do not force-sell a scalp at a material loss just because a timer expired.
+            # Time exit is allowed only after the entry signal has disappeared and the
+            # position is close to flat. A genuinely bad trade is still bounded by the
+            # hard stop below. This prevents repeated small timer-driven losses.
+            if (
+                age >= position.max_hold_seconds * 2
+                and not signals.get(position.symbol, False)
+                and current >= entry * (Decimal("1") - SCALP_TIMEOUT_MAX_LOSS_FRACTION)
+            ):
                 if position.protective_order_list_id is not None and not _cancel_protection(client, state, state_path, position):
-                    notes.append(f"scalp_hard_timeout_cancel_failed:{position.symbol}")
+                    notes.append(f"scalp_signal_timeout_cancel_failed:{position.symbol}")
                     continue
-                return _market_sell(client, state, state_path, position, limits, report_trade, now, "hard_timeout")
+                return _market_sell(client, state, state_path, position, limits, report_trade, now, "signal_timeout")
 
         if not position.trailing_active and current >= activation:
             if position.protective_order_list_id is not None and not _cancel_protection(client, state, state_path, position):
@@ -589,6 +599,8 @@ def run_portfolio_cycle(
             peak = max(peak, current)
             position.peak_price = str(peak)
             trailing_stop = peak * (Decimal("1") - trailing_gap)
+            if position.strategy == "scalp":
+                trailing_stop = max(trailing_stop, entry * (Decimal("1") + SCALP_BREAKEVEN_LOCK_FRACTION))
             position.trailing_stop_price = str(trailing_stop)
             save_state(state_path, state)
             if _protection_enabled():
@@ -605,6 +617,8 @@ def run_portfolio_cycle(
             if current > peak:
                 new_peak = current
                 new_stop = new_peak * (Decimal("1") - trailing_gap)
+                if position.strategy == "scalp":
+                    new_stop = max(new_stop, entry * (Decimal("1") + SCALP_BREAKEVEN_LOCK_FRACTION))
                 position.peak_price = str(new_peak)
                 position.trailing_stop_price = str(new_stop)
                 save_state(state_path, state)

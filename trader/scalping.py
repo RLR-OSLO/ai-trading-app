@@ -75,13 +75,13 @@ def analyze_scalp(timeframes: dict[str, Sequence[Sequence[object]]], *, aggressi
 
     baseline_volume = sum(volumes_1m[-21:-1], Decimal("0")) / Decimal("20")
     volume_ratio = volumes_1m[-1] / baseline_volume if baseline_volume > 0 else Decimal("0")
-    if volume_ratio >= (Decimal("1.05") if aggressive else Decimal("1.15")):
+    if volume_ratio >= (Decimal("1.10") if aggressive else Decimal("1.15")):
         score += 1
         reasons.append("1m_volume_burst")
 
     three_min_ago = closes_1m[-4]
     momentum = ((closes_1m[-1] / three_min_ago) - Decimal("1")) * Decimal("100") if three_min_ago > 0 else Decimal("0")
-    if momentum >= (Decimal("0.08") if aggressive else Decimal("0.15")):
+    if momentum >= (Decimal("0.12") if aggressive else Decimal("0.15")):
         score += 1
         reasons.append("3m_momentum")
 
@@ -98,7 +98,7 @@ def analyze_scalp(timeframes: dict[str, Sequence[Sequence[object]]], *, aggressi
     if falling:
         reasons.append("scalp_falling")
 
-    threshold = 5 if aggressive else 6
+    threshold = 6
     trend_confirmed = "5m_trend" in reasons
     momentum_confirmed = any(reason in reasons for reason in ("1m_volume_burst", "3m_momentum", "10m_breakout"))
     confidence = min(Decimal("1"), Decimal(score) / Decimal("8"))
