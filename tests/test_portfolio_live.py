@@ -120,9 +120,9 @@ class PortfolioLiveTests(unittest.TestCase):
         position = state.positions[0]
         self.assertIn("strategy=scalp", result)
         self.assertEqual(position.strategy, "scalp")
-        self.assertEqual(position.stop_fraction, "0.0045")
-        self.assertEqual(position.target_fraction, "0.0075")
-        self.assertEqual(position.max_hold_seconds, 900)
+        self.assertEqual(position.stop_fraction, "0.0075")
+        self.assertEqual(position.target_fraction, "0.0060")
+        self.assertEqual(position.max_hold_seconds, 1800)
         self.assertEqual(client.oco_orders, 1)
 
     def test_target_becomes_trailing_activation_and_profit_can_run(self):
@@ -141,7 +141,7 @@ class PortfolioLiveTests(unittest.TestCase):
         self.assertIn("trailing_active:BTCUSDC", result)
         self.assertTrue(position.trailing_active)
         self.assertEqual(Decimal(position.peak_price), Decimal("110"))
-        self.assertEqual(Decimal(position.trailing_stop_price), Decimal("108.90"))
+        self.assertEqual(Decimal(position.trailing_stop_price), Decimal("109.5050"))
         self.assertEqual(client.cancelled_oco, 1)
         self.assertEqual(client.oco_orders, 2)
         self.assertEqual(client.live_sells, 0)
@@ -162,10 +162,10 @@ class PortfolioLiveTests(unittest.TestCase):
         position = state.positions[0]
         self.assertIn("trailing_raise:BTCUSDC", result)
         self.assertEqual(Decimal(position.peak_price), Decimal("110"))
-        self.assertEqual(Decimal(position.trailing_stop_price), Decimal("108.90"))
+        self.assertEqual(Decimal(position.trailing_stop_price), Decimal("109.5050"))
         self.assertGreaterEqual(client.cancelled_oco, 2)
 
-    def test_expired_scalp_cancels_oco_before_market_exit(self):
+    def test_expired_scalp_only_time_exits_when_profitable(self):
         client = FakeClient()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
@@ -177,11 +177,12 @@ class PortfolioLiveTests(unittest.TestCase):
                 entry_strategies={"BTCUSDC": "scalp"},
             )
             state = load_state(path)
-            state.positions[0].opened_at = 1
+            state.positions[0].opened_at = int(__import__("time").time()) - 1900
             state.cooldown_until = 0
             save_state(path, state)
+            client.price = Decimal("100.30")
             result = run_portfolio_cycle(client, {"BTCUSDC": False}, path, self.limits())
-        self.assertIn("reason=timeout", result)
+        self.assertIn("reason=timeout_profit", result)
         self.assertEqual(client.cancelled_oco, 1)
         self.assertEqual(client.live_sells, 1)
 
@@ -194,9 +195,9 @@ class PortfolioLiveTests(unittest.TestCase):
             "take_profit_percent": "2",
             "max_daily_loss_usdc": "5",
         })
-        self.assertEqual(limits.max_open_positions, 8)
-        self.assertEqual(limits.cooldown_seconds, 15)
-        self.assertEqual(limits.max_trades_per_day, 100)
+        self.assertEqual(limits.max_open_positions, 4)
+        self.assertEqual(limits.cooldown_seconds, 90)
+        self.assertEqual(limits.max_trades_per_day, 36)
 
 
 if __name__ == "__main__":

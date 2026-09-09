@@ -374,6 +374,8 @@ def main() -> None:
                     activation_overrides[pair] = activation
                     size_multipliers[pair] = size_multiplier
                     max_hold_overrides[pair] = BULLRUN_MAX_HOLD_SECONDS
+                elif strategy == "scalp":
+                    size_multipliers[pair] = Decimal("0.65") if risk_profile == "high" else Decimal("0.75")
 
             result = run_portfolio_cycle(
                 client,

@@ -24,7 +24,7 @@ class ScalpingTests(unittest.TestCase):
         one_minute[-1][5] = "140"
         analysis = analyze_scalp({"1m": one_minute, "5m": five_minute}, aggressive=True)
         self.assertTrue(analysis.signal)
-        self.assertGreaterEqual(analysis.score, 4)
+        self.assertGreaterEqual(analysis.score, 5)
         self.assertIn("1m_fast_trend", analysis.reasons)
         self.assertIn("5m_trend", analysis.reasons)
 

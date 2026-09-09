@@ -98,6 +98,11 @@ def analyze_scalp(timeframes: dict[str, Sequence[Sequence[object]]], *, aggressi
     if falling:
         reasons.append("scalp_falling")
 
-    threshold = 4 if aggressive else 5
+    threshold = 5 if aggressive else 6
+    trend_confirmed = "5m_trend" in reasons
+    momentum_confirmed = any(reason in reasons for reason in ("1m_volume_burst", "3m_momentum", "10m_breakout"))
     confidence = min(Decimal("1"), Decimal(score) / Decimal("8"))
-    return ScalpAnalysis(not veto and score >= threshold, score, confidence, rsi, volume_ratio, momentum, tuple(reasons))
+    return ScalpAnalysis(
+        not veto and trend_confirmed and momentum_confirmed and score >= threshold,
+        score, confidence, rsi, volume_ratio, momentum, tuple(reasons)
+    )

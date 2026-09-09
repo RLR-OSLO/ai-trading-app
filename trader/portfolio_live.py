@@ -12,12 +12,15 @@ from typing import Any, Callable
 
 from .binance import BinanceError, BinanceSpotClient
 
-PROFILE_LIMITS = {"low": (6, 1800, 1), "normal": (24, 180, 4), "high": (100, 15, 8)}
-SCALP_STOP_FRACTION = Decimal("0.0045")
-SCALP_TARGET_FRACTION = Decimal("0.0075")
-SCALP_MAX_HOLD_SECONDS = 900
+PROFILE_LIMITS = {"low": (6, 1800, 1), "normal": (12, 300, 3), "high": (36, 90, 4)}
+SCALP_STOP_FRACTION = Decimal("0.0075")
+SCALP_TARGET_FRACTION = Decimal("0.0060")
+SCALP_MAX_HOLD_SECONDS = 1800
 TRAILING_OCO_CEILING_FRACTION = Decimal("0.50")
 TRAILING_REFRESH_FRACTION = Decimal("0.001")
+TRAILING_GAP_RATIO = Decimal("0.45")
+TRAILING_MIN_GAP_FRACTION = Decimal("0.0025")
+SCALP_TIMEOUT_PROFIT_FRACTION = Decimal("0.0025")
 
 
 @dataclass
@@ -550,13 +553,6 @@ def run_portfolio_cycle(
                 continue
             notes.append(f"local_stop_protection_removed:{position.symbol}")
 
-        expired_scalp = position.strategy == "scalp" and position.max_hold_seconds is not None and now - position.opened_at >= position.max_hold_seconds
-        if expired_scalp:
-            if not _cancel_protection(client, state, state_path, position):
-                notes.append(f"scalp_expiry_cancel_failed:{position.symbol}")
-                continue
-            return _market_sell(client, state, state_path, position, limits, report_trade, now, "timeout")
-
         checked = _check_protection(client, state, state_path, position, limits, report_trade)
         if checked and checked.startswith("sold:"):
             return checked
@@ -569,7 +565,21 @@ def run_portfolio_cycle(
         stop_fraction, activation_fraction = _position_limits(position, limits)
         hard_stop = entry * (Decimal("1") - stop_fraction)
         activation = entry * (Decimal("1") + activation_fraction)
+        trailing_gap = max(TRAILING_MIN_GAP_FRACTION, stop_fraction * TRAILING_GAP_RATIO)
         peak = Decimal(position.peak_price) if position.peak_price is not None else entry
+
+        if position.strategy == "scalp" and position.max_hold_seconds is not None:
+            age = now - position.opened_at
+            if age >= position.max_hold_seconds and current >= entry * (Decimal("1") + SCALP_TIMEOUT_PROFIT_FRACTION):
+                if position.protective_order_list_id is not None and not _cancel_protection(client, state, state_path, position):
+                    notes.append(f"scalp_profit_timeout_cancel_failed:{position.symbol}")
+                    continue
+                return _market_sell(client, state, state_path, position, limits, report_trade, now, "timeout_profit")
+            if age >= position.max_hold_seconds * 2:
+                if position.protective_order_list_id is not None and not _cancel_protection(client, state, state_path, position):
+                    notes.append(f"scalp_hard_timeout_cancel_failed:{position.symbol}")
+                    continue
+                return _market_sell(client, state, state_path, position, limits, report_trade, now, "hard_timeout")
 
         if not position.trailing_active and current >= activation:
             if position.protective_order_list_id is not None and not _cancel_protection(client, state, state_path, position):
@@ -578,7 +588,7 @@ def run_portfolio_cycle(
             position.trailing_active = True
             peak = max(peak, current)
             position.peak_price = str(peak)
-            trailing_stop = peak * (Decimal("1") - stop_fraction)
+            trailing_stop = peak * (Decimal("1") - trailing_gap)
             position.trailing_stop_price = str(trailing_stop)
             save_state(state_path, state)
             if _protection_enabled():
@@ -591,10 +601,10 @@ def run_portfolio_cycle(
             continue
 
         if position.trailing_active:
-            old_stop = Decimal(position.trailing_stop_price) if position.trailing_stop_price else peak * (Decimal("1") - stop_fraction)
+            old_stop = Decimal(position.trailing_stop_price) if position.trailing_stop_price else peak * (Decimal("1") - trailing_gap)
             if current > peak:
                 new_peak = current
-                new_stop = new_peak * (Decimal("1") - stop_fraction)
+                new_stop = new_peak * (Decimal("1") - trailing_gap)
                 position.peak_price = str(new_peak)
                 position.trailing_stop_price = str(new_stop)
                 save_state(state_path, state)
