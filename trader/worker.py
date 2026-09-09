@@ -236,11 +236,17 @@ def main() -> None:
                     ),
                 )
                 price_text = ",".join(f"{pair}:{client.ticker_price(pair)}" for pair in pairs)
+                account_snapshot = client.account()
+                balances_text = ",".join(
+                    f"{row.get('asset')}:{Decimal(str(row.get('free','0'))) + Decimal(str(row.get('locked','0')))}"
+                    for row in account_snapshot.get("balances", [])
+                    if Decimal(str(row.get("free", "0"))) + Decimal(str(row.get("locked", "0"))) > 0
+                )
                 reporter.record_event(
                     "heartbeat",
                     f"live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
                     f"signals={signal_text};scores={score_text};scalp_scores={scalp_score_text};"
-                    f"prices={price_text};markets={','.join(pairs)};"
+                    f"prices={price_text};balances={balances_text};markets={','.join(pairs)};"
                     f"best={best_pair}:{strategies[best_pair]}:{analyses[best_pair].score}/{scalp_analyses[best_pair].score};"
                     f"reasons={','.join(scalp_analyses[best_pair].reasons if strategies[best_pair] == 'scalp' else analyses[best_pair].reasons)}",
                 )

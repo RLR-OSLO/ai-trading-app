@@ -78,6 +78,18 @@ export default function TradingDashboard() {
     return prices;
   }, [lastEvent]);
 
+  const binanceBalances = useMemo(() => {
+    const balances = new Map<string, number>();
+    const match = lastEvent?.message.match(/(?:^|;)balances=([^;]+)/);
+    if (!match) return balances;
+    for (const item of match[1].split(",")) {
+      const [asset, rawQty] = item.split(":");
+      const qty = Number(rawQty);
+      if (asset && Number.isFinite(qty)) balances.set(asset, qty);
+    }
+    return balances;
+  }, [lastEvent]);
+
   const assets = useMemo(() => {
     const suffix = settings.quote_asset;
     const names = new Set<string>(MARKET_UNIVERSE);
@@ -106,11 +118,14 @@ export default function TradingDashboard() {
       }
     }
     const pnl = assetTrades.reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
+    const walletQuantity = binanceBalances.has(asset) ? Number(binanceBalances.get(asset)) : quantity;
+    const authoritativeQuantity = walletQuantity * (marketPrices.get(symbol) ?? 0) >= 5 ? walletQuantity : 0;
     const currentPrice = marketPrices.get(symbol) ?? null;
-    const currentValue = currentPrice === null ? null : quantity * currentPrice;
-    const unrealized = currentValue === null ? null : currentValue - invested;
-    return { asset, invested, quantity, pnl, currentPrice, currentValue, unrealized, owned: quantity > 0.000000001 };
-  }).sort((a, b) => Number(b.owned) - Number(a.owned) || MARKET_UNIVERSE.indexOf(a.asset as typeof MARKET_UNIVERSE[number]) - MARKET_UNIVERSE.indexOf(b.asset as typeof MARKET_UNIVERSE[number])), [assets, settings.quote_asset, trades, marketPrices]);
+    const currentValue = currentPrice === null ? null : authoritativeQuantity * currentPrice;
+    const adjustedInvested = quantity > 0 && authoritativeQuantity > 0 ? invested * Math.min(1, authoritativeQuantity / quantity) : 0;
+    const unrealized = currentValue === null ? null : currentValue - adjustedInvested;
+    return { asset, invested: adjustedInvested, quantity: authoritativeQuantity, pnl, currentPrice, currentValue, unrealized, owned: authoritativeQuantity > 0.000000001 };
+  }).sort((a, b) => Number(b.owned) - Number(a.owned) || MARKET_UNIVERSE.indexOf(a.asset as typeof MARKET_UNIVERSE[number]) - MARKET_UNIVERSE.indexOf(b.asset as typeof MARKET_UNIVERSE[number])), [assets, settings.quote_asset, trades, marketPrices, binanceBalances]);
 
   const availableCapital = useMemo(() => {
     const match = lastEvent?.message.match(/(?:^|;)available=([0-9.]+)/);

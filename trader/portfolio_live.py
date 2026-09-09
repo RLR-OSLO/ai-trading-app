@@ -403,6 +403,17 @@ def recover_positions_from_trade_history(
         quantity = min(lot["qty"], wallet_qty)
         if quantity <= Decimal("0.00000001"):
             continue
+        # Binance wallet is authoritative. Ignore residual dust that cannot be
+        # sold as a real position, otherwise stale trade history resurrects it
+        # every worker cycle.
+        try:
+            sellable = _sellable_quantity(client, symbol, quantity)
+            current_price = client.ticker_price(symbol)
+        except BinanceError:
+            continue
+        if sellable <= 0 or sellable * current_price < Decimal("5"):
+            continue
+        quantity = sellable
         avg_price = lot["cost"] / lot["qty"] if lot["qty"] > 0 else Decimal("0")
         if avg_price <= 0:
             continue
