@@ -141,6 +141,9 @@ class BinanceSpotClient:
             signed=True,
         )
 
+    def open_orders(self, *, symbol: str) -> list[dict[str, Any]]:
+        return self._request("GET", "/api/v3/openOrders", {"symbol": symbol}, signed=True)
+
     def cancel_order_list(self, *, symbol: str, order_list_id: int) -> dict[str, Any]:
         return self._request(
             "DELETE",
