@@ -17,10 +17,10 @@ from .scalping import ScalpAnalysis, analyze_scalp
 
 LOG = logging.getLogger("ai_trader")
 RISK_THRESHOLDS = {"low": 7, "normal": 6, "high": 4}
-ACTIVE_MARKET_COUNT = 20
-MIN_24H_QUOTE_VOLUME = Decimal(os.getenv("MIN_24H_QUOTE_VOLUME", "25000000"))
-MIN_24H_TRADES = int(os.getenv("MIN_24H_TRADES", "20000"))
-MAX_SPREAD_BPS = Decimal(os.getenv("MAX_SPREAD_BPS", "25"))
+ACTIVE_MARKET_COUNT = 12
+MIN_24H_QUOTE_VOLUME = Decimal(os.getenv("MIN_24H_QUOTE_VOLUME", "5000000"))
+MIN_24H_TRADES = int(os.getenv("MIN_24H_TRADES", "5000"))
+MAX_SPREAD_BPS = Decimal(os.getenv("MAX_SPREAD_BPS", "20"))
 BULLRUN_MAX_HOLD_SECONDS = int(os.getenv("BULLRUN_MAX_HOLD_SECONDS", "21600"))
 MARKET_UNIVERSE = (
     "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LINK",
@@ -118,7 +118,7 @@ def free_quote_balance(client: BinanceSpotClient, quote_asset: str) -> Decimal:
     return Decimal("0")
 
 
-def binance_account_summary(client: BinanceSpotClient, quote_asset: str) -> tuple[str, Decimal, Decimal]:
+def binance_account_summary(client: BinanceSpotClient, quote_asset: str) -> tuple[str, Decimal, Decimal, str]:
     account = client.account()
     balances = {
         str(row.get("asset")): Decimal(str(row.get("free", "0"))) + Decimal(str(row.get("locked", "0")))
@@ -167,16 +167,19 @@ def binance_account_summary(client: BinanceSpotClient, quote_asset: str) -> tupl
 
     total = Decimal("0")
     invested = Decimal("0")
+    wallet_values: dict[str, Decimal] = {}
     for asset, quantity in balances.items():
         conversion = in_quote(asset)
         if conversion is None:
             continue
         value = quantity * conversion
+        wallet_values[asset] = value
         total += value
         if asset != quote_asset:
             invested += value
     balance_text = ",".join(f"{asset}:{quantity}" for asset, quantity in balances.items()) or "none"
-    return balance_text, total, invested
+    wallet_value_text = ",".join(f"{asset}:{value}" for asset, value in wallet_values.items()) or "none"
+    return balance_text, total, invested, wallet_value_text
 
 
 def bullrun_candidate(analysis: MarketAnalysis, scalp: ScalpAnalysis, risk_profile: str) -> bool:
@@ -340,12 +343,12 @@ def main() -> None:
                     ),
                 )
                 price_text = ",".join(f"{pair}:{client.ticker_price(pair)}" for pair in pairs)
-                balances_text, account_total, invested_value = binance_account_summary(client, quote_asset)
+                balances_text, account_total, invested_value, wallet_value_text = binance_account_summary(client, quote_asset)
                 reporter.record_event(
                     "heartbeat",
                     f"live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
                     f"signals={signal_text};scores={score_text};scalp_scores={scalp_score_text};"
-                    f"prices={price_text};balances={balances_text};account_total={account_total};invested_value={invested_value};markets={','.join(pairs)};"
+                    f"prices={price_text};balances={balances_text};wallet_values={wallet_value_text};account_total={account_total};invested_value={invested_value};markets={','.join(pairs)};"
                     f"best={best_pair}:{strategies[best_pair]}:{analyses[best_pair].score}/{scalp_analyses[best_pair].score};"
                     f"reasons={','.join(scalp_analyses[best_pair].reasons if strategies[best_pair] == 'scalp' else analyses[best_pair].reasons)}",
                 )
