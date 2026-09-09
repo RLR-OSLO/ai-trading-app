@@ -128,16 +128,25 @@ export default function TradingDashboard() {
   }).sort((a, b) => Number(b.owned) - Number(a.owned) || MARKET_UNIVERSE.indexOf(a.asset as typeof MARKET_UNIVERSE[number]) - MARKET_UNIVERSE.indexOf(b.asset as typeof MARKET_UNIVERSE[number])), [assets, settings.quote_asset, trades, marketPrices, binanceBalances]);
 
   const availableCapital = useMemo(() => {
+    const walletValue = binanceBalances.get(settings.quote_asset);
+    if (walletValue !== undefined && Number.isFinite(walletValue)) return walletValue;
     const match = lastEvent?.message.match(/(?:^|;)available=([0-9.]+)/);
     const value = match ? Number(match[1]) : Number.NaN;
     return Number.isFinite(value) ? value : Number(settings.trade_cap_usdc);
-  }, [lastEvent, settings.trade_cap_usdc]);
+  }, [binanceBalances, lastEvent, settings.quote_asset, settings.trade_cap_usdc]);
 
-  const portfolioValue = useMemo(() => allocations.reduce((sum, allocation) =>
-    sum + (allocation.owned ? Number(allocation.currentValue ?? allocation.invested) : 0), 0), [allocations]);
-  const investedCost = useMemo(() => allocations.reduce((sum, allocation) =>
-    sum + (allocation.owned ? Number(allocation.invested) : 0), 0), [allocations]);
-  const totalAssets = availableCapital + portfolioValue;
+  const portfolioValue = useMemo(() => {
+    const match = lastEvent?.message.match(/(?:^|;)invested_value=([0-9.]+)/);
+    const value = match ? Number(match[1]) : Number.NaN;
+    if (Number.isFinite(value)) return value;
+    return allocations.reduce((sum, allocation) => sum + (allocation.owned ? Number(allocation.currentValue ?? 0) : 0), 0);
+  }, [allocations, lastEvent]);
+
+  const totalAssets = useMemo(() => {
+    const match = lastEvent?.message.match(/(?:^|;)account_total=([0-9.]+)/);
+    const value = match ? Number(match[1]) : Number.NaN;
+    return Number.isFinite(value) ? value : availableCapital + portfolioValue;
+  }, [availableCapital, lastEvent, portfolioValue]);
 
   const serverOnline = lastEvent ? Date.now() - new Date(lastEvent.created_at).getTime() < 900_000 : false;
   const maxOrderSize = Math.max(5, availableCapital);
@@ -194,9 +203,9 @@ export default function TradingDashboard() {
     <section className="hero"><div><p className="eyebrow">LIVE SPOT-TRADING</p><h2>Tilgjengelig saldo. Spot-only. Harde tapsgrenser.</h2><p className="muted">Binance-uttak, futures og giring er deaktivert.</p></div><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button></section>
     <section className="panel" style={{ marginBottom: 18 }}>
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 18, alignItems: "end" }}>
-        <div><span className="label">TOTAL VERDI</span><strong style={{ display: "block", fontSize: "clamp(2.2rem, 5vw, 4.4rem)", lineHeight: 1.05, marginTop: 8 }}>{money(totalAssets)} {settings.quote_asset}</strong><small>Ledige midler + markedsverdi av åpne posisjoner</small></div>
-        <div><span className="label">Investert nå</span><strong style={{ display: "block", fontSize: "1.6rem", marginTop: 8 }}>{money(portfolioValue)} {settings.quote_asset}</strong><small>Kostpris: {money(investedCost)} {settings.quote_asset}</small></div>
-        <div><span className="label">Ikke investert</span><strong style={{ display: "block", fontSize: "1.6rem", marginTop: 8 }}>{money(availableCapital)} {settings.quote_asset}</strong><small>Fri saldo</small></div>
+        <div><span className="label">TOTAL BINANCE-VERDI</span><strong style={{ display: "block", fontSize: "clamp(2.2rem, 5vw, 4.4rem)", lineHeight: 1.05, marginTop: 8 }}>{money(totalAssets)} {settings.quote_asset}</strong><small>Kun faktisk beholdning på Binance, verdsatt til markedspris</small></div>
+        <div><span className="label">Investert på Binance</span><strong style={{ display: "block", fontSize: "1.6rem", marginTop: 8 }}>{money(portfolioValue)} {settings.quote_asset}</strong><small>Faktisk krypto-beholdning nå</small></div>
+        <div><span className="label">Ledig på Binance</span><strong style={{ display: "block", fontSize: "1.6rem", marginTop: 8 }}>{money(availableCapital)} {settings.quote_asset}</strong><small>Faktisk fri {settings.quote_asset}-saldo</small></div>
       </div>
     </section>
     <section className="grid metrics">
