@@ -229,18 +229,94 @@ export default function TradingDashboard() {
     setSaving(false);
   }
 
+  function heartbeatField(name: string): string | null {
+    const match = lastEvent?.message.match(new RegExp(`(?:^|;)${name}=([^;]+)`));
+    return match?.[1] ?? null;
+  }
+
+  function scoreMap(field: string): Map<string, number> {
+    const result = new Map<string, number>();
+    const raw = heartbeatField(field);
+    if (!raw || raw === "none") return result;
+    for (const item of raw.split(",")) {
+      const [symbol, value] = item.split(":");
+      const number = Number(value);
+      if (symbol && Number.isFinite(number)) result.set(symbol, number);
+    }
+    return result;
+  }
+
+  function requestedSymbol(normalized: string): string | null {
+    const upper = normalized.toUpperCase();
+    for (const asset of MARKET_UNIVERSE) {
+      if (new RegExp(`(^|[^A-Z0-9])${asset}([^A-Z0-9]|$)`).test(upper)) return `${asset}${settings.quote_asset}`;
+    }
+    return null;
+  }
+
+  function explainMarket(symbol: string): string {
+    if (!lastEvent) return "Jeg mangler ferske markedsdata akkurat nå.";
+    const markets = (heartbeatField("markets") ?? "").split(",").filter(Boolean);
+    const signals = heartbeatField("signals") ?? "none";
+    const bullruns = heartbeatField("bullrun") ?? "none";
+    const swingScores = scoreMap("scores");
+    const scalpScores = scoreMap("scalp_scores");
+    const threshold = Number(heartbeatField("threshold") ?? "0");
+    const base = symbol.replace(settings.quote_asset, "");
+    if (!markets.includes(symbol)) {
+      return `${base} er ikke blant de aktive markedene boten følger akkurat nå. Boten velger bare opptil 12 markeder som består likviditetskravene og rangerer høyest på volum/aktivitet. Derfor vurderes ikke ${base} for kjøp i denne syklusen.`;
+    }
+    const swing = swingScores.get(symbol);
+    const scalp = scalpScores.get(symbol);
+    const hasSignal = signals !== "none" && signals.split(",").some((item) => item.startsWith(`${symbol}:`));
+    const isBullrun = bullruns !== "none" && bullruns.split(",").includes(symbol);
+    if (hasSignal) {
+      return `${base} har faktisk et aktivt kjøpssignal nå. Swing-score er ${swing ?? "–"}${threshold ? ` (krav ${threshold})` : ""}, scalp-score er ${scalp ?? "–"}${isBullrun ? ", og den er markert som bull run" : ""}. Hvis den likevel ikke kjøper, er neste sperre typisk kapital, cooldown, maks antall posisjoner eller daglig tapsgrense.`;
+    }
+    return `${base} er med i aktiv overvåking, men har ikke kjøpssignal nå. Swing-score er ${swing ?? "–"}${threshold ? ` mot krav ${threshold}` : ""}, og scalp-score er ${scalp ?? "–"}. ${isBullrun ? "Den er markert som bull run, men et annet risikofilter blokkerer entry." : "Bull-run-signal er ikke aktivt."}`;
+  }
+
   async function sendChat() {
     const text = chatInput.trim();
     if (!text) return;
-    const normalized = text.toLocaleLowerCase("nb-NO"); const nextId = Date.now(); setChatInput(""); setChatMessages((current) => [...current, { id: nextId, role: "boss", text }]);
+    const normalized = text.toLocaleLowerCase("nb-NO");
+    const nextId = Date.now();
+    setChatInput("");
+    setChatMessages((current) => [...current, { id: nextId, role: "boss", text }]);
+    const symbol = requestedSymbol(normalized);
     let reply: string;
-    if (normalized.includes("pause") || normalized.includes("stopp")) { await setLive(false); reply = "Botten er pauset. Ingen nye handler kan åpnes før du aktiverer LIVE igjen med knappen over."; }
-    else if (normalized.includes("kjøp") || normalized.includes("selg") || normalized.includes("trade") || normalized.includes("handel nå")) reply = "Direkte kjøp og salg fra fritekst er sperret. Jeg handler bare når den godkjente strategien og tapsgrensene tillater det.";
-    else if (normalized.includes("siste") && normalized.includes("handel")) { const trade = trades[0]; reply = trade ? `Siste handel: ${trade.side} ${trade.symbol}, ${Number(trade.quantity).toPrecision(6)} enheter, ${money(Number(trade.pnl ?? 0))} USDC realisert resultat.` : "Det er ikke registrert noen handler ennå."; }
-    else if (normalized.includes("resultat") || normalized.includes("gevinst") || normalized.includes("tap")) reply = `Realisert totalresultat er ${money(stats.total)} USDC. Siste døgn: ${money(stats.day)} USDC. Estimerte gebyrer: ${money(stats.feesEstimate)} USDC.`;
-    else if (normalized.includes("hvorfor") || normalized.includes("signal") || normalized.includes("analyse")) reply = lastEvent?.message ? `Siste analyse fra serveren: ${lastEvent.message}` : "Jeg har ikke mottatt et analysesignal fra serveren ennå.";
-    else if (normalized.includes("status") || normalized.includes("live") || normalized.includes("aktiv")) reply = `${serverOnline ? "Serveren er online" : "Serverstatusen er ikke fersk"}. Trading er ${settings.live_trading_enabled ? "LIVE" : "PAUSET"}. Tilgjengelig kapital er ${money(availableCapital)} ${settings.quote_asset}, og ordrestørrelsen er ${money(settings.order_size_usdc)} ${settings.quote_asset}.`;
-    else reply = "Jeg kan svare om status, resultat, siste handel og siste analyse. Jeg kan også pause botten. Direkte kjøp/salg fra chat er sperret.";
+
+    if (normalized.includes("pause") || normalized.includes("stopp bot") || normalized === "stopp") {
+      await setLive(false);
+      reply = "Boten er pauset. Nye kjøp er blokkert, mens åpne posisjoner fortsatt overvåkes av stop-loss/trailing.";
+    } else if ((normalized.includes("hvorfor") || normalized.includes("signal") || normalized.includes("analyse")) && symbol) {
+      reply = explainMarket(symbol);
+    } else if (normalized.includes("hvorfor") && (normalized.includes("kjøp") || normalized.includes("handler") || normalized.includes("handel"))) {
+      const best = heartbeatField("best");
+      const signals = heartbeatField("signals") ?? "none";
+      const news = heartbeatField("news");
+      reply = signals === "none"
+        ? `Det er ingen godkjente kjøpssignaler akkurat nå. ${best ? `Sterkeste kandidat er ${best.replaceAll(":", " / ")}. ` : ""}${news ? `Nyhetsscore er ${news}. ` : ""}Boten venter fordi minst ett av kravene for entry ikke er oppfylt.`
+        : `Det finnes signaler nå: ${signals}. Hvis ingen ordre er lagt, er en senere sperre aktiv, for eksempel cooldown, maks posisjoner, kapital eller daglig tapsgrense.`;
+    } else if (normalized.includes("siste") && normalized.includes("handel")) {
+      const trade = trades[0];
+      reply = trade ? `Siste registrerte handel er ${trade.side} ${trade.symbol}, ${Number(trade.quantity).toPrecision(6)} enheter. Realisert resultat: ${money(Number(trade.pnl ?? 0))} USDC.` : "Det er ikke registrert noen handler ennå.";
+    } else if (normalized.includes("resultat") || normalized.includes("gevinst") || normalized.includes("tap")) {
+      reply = `Realisert totalresultat er ${money(stats.total)} USDC. Siste døgn: ${money(stats.day)} USDC. Vunnet: ${money(stats.won)} USDC. Tapt: ${money(Math.abs(stats.lost))} USDC. Estimerte gebyrer: ${money(stats.feesEstimate)} USDC.`;
+    } else if (normalized.includes("sterkest") || normalized.includes("beste") || normalized.includes("best nå")) {
+      const best = heartbeatField("best");
+      reply = best ? `Sterkeste kandidat i siste scan er ${best.replaceAll(":", " / ")}. Dette er kandidat-rangering, ikke nødvendigvis et godkjent kjøpssignal.` : "Jeg har ikke fersk rangering fra siste scan.";
+    } else if (normalized.includes("status") || normalized.includes("live") || normalized.includes("aktiv")) {
+      const signals = heartbeatField("signals") ?? "none";
+      const markets = heartbeatField("markets")?.split(",").length ?? 0;
+      reply = `${serverOnline ? "Serveren er online" : "Serverstatusen er ikke fersk"}. Trading er ${settings.live_trading_enabled ? "LIVE" : "PAUSET"}. Ledig kapital er ${money(availableCapital)} ${settings.quote_asset}. ${markets} markeder overvåkes. Aktive signaler: ${signals}.`;
+    } else if ((normalized.startsWith("kjøp ") || normalized.startsWith("selg ") || normalized.includes("handel nå")) && !normalized.includes("hvorfor")) {
+      reply = "Direkte kjøp og salg fra fritekst er sperret. Tradingassistenten kan forklare hvorfor boten handler eller ikke handler, men kan ikke omgå risikoreglene.";
+    } else if (symbol) {
+      reply = explainMarket(symbol);
+    } else {
+      reply = "Spør meg konkret om en coin eller om boten, for eksempel «Hvorfor kjøper du ikke LTC nå?», «Hva er sterkeste marked?», «Hva er status?» eller «Hva var siste handel?». Jeg svarer fra siste faktiske bot- og Binance-data.";
+    }
     setChatMessages((current) => [...current, { id: nextId + 1, role: "bot", text: reply }]);
   }
 
