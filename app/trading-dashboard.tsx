@@ -360,4 +360,4 @@ export default function TradingDashboard() {
   </main>;
 }
 
-function Field({ label, value, min, max, step, onChange }: Readonly<{ label: string; value: number; min: number; max: number; step: number; onChange: (value: number) => void }>) { return <label className="number-field"><span>{label}</span><input type="number" value={value} min={min} max={max} step={step} onChange={(event) => onChange(Number(event.target.value))} /></label>; }
+function Field({ label, value, min, max, step, onChange }: Readonly<{ label: string; value: number; min: number; max?: number; step: number; onChange: (value: number) => void }>) { return <label className="number-field"><span>{label}</span><input type="number" value={value} min={min} max={max} step={step} onChange={(event) => onChange(Number(event.target.value))} /></label>; }

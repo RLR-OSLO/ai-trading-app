@@ -194,9 +194,9 @@ class PortfolioLiveTests(unittest.TestCase):
             "take_profit_percent": "2",
             "max_daily_loss_usdc": "5",
         })
-        self.assertEqual(limits.max_open_positions, 5)
+        self.assertEqual(limits.max_open_positions, 8)
         self.assertEqual(limits.cooldown_seconds, 15)
-        self.assertEqual(limits.max_trades_per_day, 80)
+        self.assertEqual(limits.max_trades_per_day, 100)
 
 
 if __name__ == "__main__":
