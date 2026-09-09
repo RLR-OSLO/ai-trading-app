@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import HowItWorks from "./how-it-works";
+import LogoutButton from "./logout-button";
 
 type Settings = {
   bot_enabled: boolean;
@@ -132,7 +133,8 @@ export default function TradingDashboard() {
       }
     }
     const pnl = assetTrades.reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
-    const walletQuantity = binanceBalances.has(asset) ? Number(binanceBalances.get(asset)) : quantity;
+    const hasBinanceBalances = /(?:^|;)balances=/.test(lastEvent?.message ?? "");
+    const walletQuantity = hasBinanceBalances ? Number(binanceBalances.get(asset) ?? 0) : quantity;
     const walletValue = binanceWalletValues.get(asset);
     const fallbackPrice = marketPrices.get(symbol) ?? null;
     const resolvedValue = walletValue !== undefined ? walletValue : (fallbackPrice === null ? null : walletQuantity * fallbackPrice);
@@ -217,7 +219,7 @@ export default function TradingDashboard() {
   }
 
   return <main className="shell">
-    <header className="topbar"><div><span className="eyebrow">AI TRADING APP</span><h1>Kontrollpanel</h1></div><span className="pill"><i /> {serverOnline ? "Server online" : "Ingen fersk serverstatus"}</span></header>
+    <header className="topbar"><div><span className="eyebrow">AI TRADING APP</span><h1>Kontrollpanel</h1></div><div style={{ display: "flex", gap: 10, alignItems: "center" }}><span className="pill"><i /> {serverOnline ? "Server online" : "Ingen fersk serverstatus"}</span><LogoutButton /></div></header>
     <section className="hero"><div><p className="eyebrow">LIVE SPOT-TRADING</p><h2>Tilgjengelig saldo. Spot-only. Harde tapsgrenser.</h2><p className="muted">Binance-uttak, futures og giring er deaktivert.</p></div><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button></section>
     <section className="panel" style={{ marginBottom: 18 }}>
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 18, alignItems: "end" }}>
