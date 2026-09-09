@@ -89,11 +89,22 @@ export default function TradingDashboard() {
   const allocations = useMemo(() => assets.map((asset) => {
     const symbol = `${asset}${settings.quote_asset}`;
     const assetTrades = trades.filter((trade) => trade.symbol === symbol);
-    const invested = assetTrades.reduce((sum, trade) => {
-      const cost = Number(trade.quantity) * Number(trade.entry_price ?? 0);
-      return Math.max(0, sum + (trade.side === "BUY" ? cost : -cost));
-    }, 0);
-    const quantity = Math.max(0, assetTrades.reduce((sum, trade) => sum + (trade.side === "BUY" ? Number(trade.quantity) : -Number(trade.quantity)), 0));
+    const orderedTrades = [...assetTrades].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    let quantity = 0;
+    let invested = 0;
+    for (const trade of orderedTrades) {
+      const tradeQuantity = Math.max(0, Number(trade.quantity));
+      if (trade.side === "BUY") {
+        quantity += tradeQuantity;
+        invested += tradeQuantity * Number(trade.entry_price ?? 0);
+      } else if (quantity > 0) {
+        const soldQuantity = Math.min(quantity, tradeQuantity);
+        const averageCost = invested / quantity;
+        quantity = Math.max(0, quantity - soldQuantity);
+        invested = Math.max(0, invested - soldQuantity * averageCost);
+        if (quantity < 0.000000001) { quantity = 0; invested = 0; }
+      }
+    }
     const pnl = assetTrades.reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
     const currentPrice = marketPrices.get(symbol) ?? null;
     const currentValue = currentPrice === null ? null : quantity * currentPrice;
