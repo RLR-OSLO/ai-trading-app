@@ -7,6 +7,7 @@ type AccessRow = {
   user_id: string;
   email: string;
   approved: boolean;
+  rejected: boolean;
   is_admin: boolean;
   created_at: string;
 };
@@ -35,7 +36,7 @@ export default function AdminUsers() {
     setIsAdmin(true);
     const { data, error } = await supabase
       .from("user_access")
-      .select("user_id,email,approved,is_admin,created_at")
+      .select("user_id,email,approved,rejected,is_admin,created_at")
       .eq("is_admin", false)
       .order("created_at", { ascending: false });
     if (error) setMessage(error.message);
@@ -50,19 +51,33 @@ export default function AdminUsers() {
     setMessage("");
     const { data: userData } = await supabase.auth.getUser();
     const adminId = userData.user?.id;
-    if (!adminId) {
-      setMessage("Fant ikke innlogget administrator.");
-      setBusy(null);
-      return;
-    }
+    if (!adminId) { setMessage("Fant ikke innlogget administrator."); setBusy(null); return; }
     const { error } = await supabase
       .from("user_access")
-      .update({ approved: true, approved_at: new Date().toISOString(), approved_by: adminId })
+      .update({ approved: true, rejected: false, approved_at: new Date().toISOString(), approved_by: adminId, rejected_at: null, rejected_by: null })
       .eq("user_id", row.user_id);
     if (error) setMessage(error.message);
     else {
-      setRows((current) => current.map((item) => item.user_id === row.user_id ? { ...item, approved: true } : item));
+      setRows((current) => current.map((item) => item.user_id === row.user_id ? { ...item, approved: true, rejected: false } : item));
       setMessage(`${row.email} er godkjent.`);
+    }
+    setBusy(null);
+  }
+
+  async function reject(row: AccessRow) {
+    setBusy(row.user_id);
+    setMessage("");
+    const { data: userData } = await supabase.auth.getUser();
+    const adminId = userData.user?.id;
+    if (!adminId) { setMessage("Fant ikke innlogget administrator."); setBusy(null); return; }
+    const { error } = await supabase
+      .from("user_access")
+      .update({ approved: false, rejected: true, rejected_at: new Date().toISOString(), rejected_by: adminId, approved_at: null, approved_by: null })
+      .eq("user_id", row.user_id);
+    if (error) setMessage(error.message);
+    else {
+      setRows((current) => current.map((item) => item.user_id === row.user_id ? { ...item, approved: false, rejected: true } : item));
+      setMessage(`${row.email} er avslått.`);
     }
     setBusy(null);
   }
@@ -78,9 +93,12 @@ export default function AdminUsers() {
     {loading ? <p className="muted">Henter brukere …</p> : rows.length === 0 ? <p className="muted">Ingen andre brukere ennå.</p> : <div className="admin-user-list">
       {rows.map((row) => <div className="admin-user-row" key={row.user_id}>
         <span className="admin-user-email">{row.email}</span>
-        {row.approved
-          ? <span className="approved-badge">GODKJENT</span>
-          : <button className="primary compact" disabled={busy === row.user_id} onClick={() => void approve(row)}>{busy === row.user_id ? "Godkjenner …" : "Godkjenn"}</button>}
+        <div className="admin-user-actions">
+          {row.approved ? <span className="approved-badge">GODKJENT</span> : row.rejected ? <span className="rejected-badge">AVSLÅTT</span> : <>
+            <button className="primary compact" disabled={busy === row.user_id} onClick={() => void approve(row)}>Godkjenn</button>
+            <button className="danger compact" disabled={busy === row.user_id} onClick={() => void reject(row)}>Avslå</button>
+          </>}
+        </div>
       </div>)}
     </div>}
     {message && <p className="muted admin-message">{message}</p>}
