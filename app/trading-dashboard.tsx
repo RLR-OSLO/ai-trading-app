@@ -217,12 +217,16 @@ export default function TradingDashboard() {
   }
 
   async function emergencyStop() {
-    setSaving(true);
+    const confirmed = window.confirm("Aktivere nødstopp? Nye kjøp stoppes. Eksisterende posisjoner beholdes under aktiv stop-loss/trailing og kan fortsatt selges automatisk for å beskytte kapitalen.");
+    if (!confirmed) return;
+    setSaving(true); setMessage("");
     const next = { ...settings, bot_enabled: false, live_trading_enabled: false };
-    setSettings(next);
     const { data: userData } = await supabase.auth.getUser();
-    if (userData.user) await supabase.from("bot_settings").upsert({ ...next, user_id: userData.user.id, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
-    setMessage("Nødstopp er lagret. Nye handler er blokkert."); setSaving(false);
+    if (!userData.user) { setSaving(false); return; }
+    const { error } = await supabase.from("bot_settings").upsert({ ...next, user_id: userData.user.id, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+    if (!error) setSettings(next);
+    setMessage(error ? error.message : "NØDSTOPP AKTIV: Nye kjøp er blokkert. Eksisterende posisjoner overvåkes fortsatt av stop-loss/trailing og kan selges automatisk.");
+    setSaving(false);
   }
 
   async function sendChat() {
@@ -242,7 +246,7 @@ export default function TradingDashboard() {
 
   return <main className="shell">
     <header className="topbar"><div><span className="eyebrow">AI TRADING APP</span><h1>Kontrollpanel</h1></div><div style={{ display: "flex", gap: 10, alignItems: "center" }}><span className="pill"><i /> {serverOnline ? "Server online" : "Ingen fersk serverstatus"}</span><LogoutButton /></div></header>
-    <section className="hero"><div><p className="eyebrow">LIVE SPOT-TRADING</p><h2>Tilgjengelig saldo. Spot-only. Harde tapsgrenser.</h2><p className="muted">Binance-uttak, futures og giring er deaktivert.</p></div><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button></section>
+    <section className="hero"><div><p className="eyebrow">LIVE SPOT-TRADING</p><h2>Tilgjengelig saldo. Spot-only. Harde tapsgrenser.</h2><p className="muted">Binance-uttak, futures og giring er deaktivert.</p></div><div className="emergency-stop-box"><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button><small>Nødstopp blokkerer nye kjøp. Åpne posisjoner blir ikke dumpet umiddelbart; boten fortsetter å overvåke dem og kan selge ved stop-loss, trailing-stop eller annen aktiv exitregel. Start live igjen for å tillate nye kjøp.</small></div></section>
     <section className="panel" style={{ marginBottom: 18 }}>
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 18, alignItems: "end" }}>
         <div><span className="label">TOTAL BINANCE-VERDI</span><strong style={{ display: "block", fontSize: "clamp(2.2rem, 5vw, 4.4rem)", lineHeight: 1.05, marginTop: 8 }}>{money(totalAssets)} {settings.quote_asset}</strong><small>Kun faktisk beholdning på Binance, verdsatt til markedspris</small></div>
