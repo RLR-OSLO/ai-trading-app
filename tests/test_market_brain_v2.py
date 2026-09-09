@@ -14,8 +14,8 @@ class MarketBrainV2Tests(unittest.TestCase):
         self.assertFalse(ticker_is_liquid(thin))
 
     def test_bullrun_requires_multitimeframe_strength_and_volume(self):
-        analysis = MarketAnalysis(True, 8, Decimal("0.88"), Decimal("62"), Decimal("1.4"), Decimal("1.6"), ("15m_trend","1h_trend","4h_trend","volume_confirmation"))
-        scalp = ScalpAnalysis(True, 6, Decimal("0.01"), Decimal("0.02"), Decimal("1.4"), ("1m_fast_trend",))
+        analysis = MarketAnalysis(True, 8, Decimal("0.88"), Decimal("62"), Decimal("1.4"), Decimal("1.6"), ("15m_trend", "1h_trend", "4h_trend", "volume_confirmation"))
+        scalp = ScalpAnalysis(True, 6, Decimal("0.66"), Decimal("61"), Decimal("1.4"), Decimal("0.35"), ("1m_fast_trend",))
         self.assertTrue(bullrun_candidate(analysis, scalp, "high"))
         weak = MarketAnalysis(True, 8, Decimal("0.88"), Decimal("62"), Decimal("1.4"), Decimal("1.0"), ("15m_trend",))
         self.assertFalse(bullrun_candidate(weak, scalp, "high"))
