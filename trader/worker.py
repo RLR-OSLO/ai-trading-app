@@ -18,6 +18,10 @@ from .scalping import ScalpAnalysis, analyze_scalp
 LOG = logging.getLogger("ai_trader")
 RISK_THRESHOLDS = {"low": 7, "normal": 6, "high": 4}
 ACTIVE_MARKET_COUNT = 20
+MIN_24H_QUOTE_VOLUME = Decimal(os.getenv("MIN_24H_QUOTE_VOLUME", "25000000"))
+MIN_24H_TRADES = int(os.getenv("MIN_24H_TRADES", "20000"))
+MAX_SPREAD_BPS = Decimal(os.getenv("MAX_SPREAD_BPS", "25"))
+BULLRUN_MAX_HOLD_SECONDS = int(os.getenv("BULLRUN_MAX_HOLD_SECONDS", "21600"))
 MARKET_UNIVERSE = (
     "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LINK",
     "SUI", "XLM", "BCH", "LTC", "DOT", "SHIB", "TON", "HBAR", "UNI", "AAVE",
@@ -52,6 +56,18 @@ def build_client() -> BinanceSpotClient:
     )
 
 
+def ticker_is_liquid(item: dict[str, object]) -> bool:
+    quote_volume = Decimal(str(item.get("quoteVolume", "0")))
+    trades = int(item.get("count", 0) or 0)
+    bid = Decimal(str(item.get("bidPrice", "0")))
+    ask = Decimal(str(item.get("askPrice", "0")))
+    if quote_volume < MIN_24H_QUOTE_VOLUME or trades < MIN_24H_TRADES or bid <= 0 or ask <= 0 or ask < bid:
+        return False
+    mid = (bid + ask) / Decimal("2")
+    spread_bps = ((ask - bid) / mid) * Decimal("10000") if mid > 0 else Decimal("999999")
+    return spread_bps <= MAX_SPREAD_BPS
+
+
 def active_pairs(client: BinanceSpotClient, quote_asset: str) -> tuple[str, ...]:
     if quote_asset not in DEFAULT_CONFIG.preferred_quote_assets:
         raise ValueError("Quote asset is outside the approved allowlist")
@@ -66,15 +82,18 @@ def active_pairs(client: BinanceSpotClient, quote_asset: str) -> tuple[str, ...]
         and item.get("isSpotTradingAllowed", True)
     }
     tickers = client._request("GET", "/api/v3/ticker/24hr")
-    quote_volume = {
-        item.get("symbol"): Decimal(str(item.get("quoteVolume", "0")))
-        for item in tickers
-        if item.get("symbol") in available
-    }
-    ordered = sorted(available, key=lambda symbol: quote_volume.get(symbol, Decimal("0")), reverse=True)
-    selected = tuple(ordered[:ACTIVE_MARKET_COUNT])
+    eligible = [item for item in tickers if item.get("symbol") in available and ticker_is_liquid(item)]
+    ordered = sorted(
+        eligible,
+        key=lambda item: (Decimal(str(item.get("quoteVolume", "0"))), int(item.get("count", 0) or 0)),
+        reverse=True,
+    )
+    selected = tuple(str(item.get("symbol")) for item in ordered[:ACTIVE_MARKET_COUNT])
     if not selected:
-        raise BinanceError(f"No approved {quote_asset} spot pairs are currently available")
+        raise BinanceError(
+            f"No approved {quote_asset} spot pairs meet liquidity requirements "
+            f"(volume>={MIN_24H_QUOTE_VOLUME}, trades>={MIN_24H_TRADES}, spread<={MAX_SPREAD_BPS}bps)"
+        )
     return selected
 
 
@@ -160,6 +179,26 @@ def binance_account_summary(client: BinanceSpotClient, quote_asset: str) -> tupl
     return balance_text, total, invested
 
 
+def bullrun_candidate(analysis: MarketAnalysis, scalp: ScalpAnalysis, risk_profile: str) -> bool:
+    return (
+        risk_profile in {"normal", "high"}
+        and analysis.score >= 7
+        and analysis.volume_ratio_15m >= Decimal("1.25")
+        and Decimal("0.35") <= analysis.atr_percent_1h <= Decimal("6")
+        and scalp.score >= 4
+        and "risk_veto" not in analysis.reasons
+    )
+
+
+def bullrun_profile(analysis: MarketAnalysis, configured_stop_percent: object, risk_profile: str) -> tuple[Decimal, Decimal, Decimal]:
+    configured = Decimal(str(configured_stop_percent or "1")) / Decimal("100")
+    atr_fraction = analysis.atr_percent_1h / Decimal("100")
+    stop = min(Decimal("0.03"), max(configured, atr_fraction * Decimal("1.5")))
+    activation = min(Decimal("0.05"), max(Decimal("0.02"), stop * Decimal("1.25")))
+    size_multiplier = Decimal("1.50") if risk_profile == "high" else Decimal("1.25")
+    return stop, activation, size_multiplier
+
+
 def market_scan(
     client: BinanceSpotClient,
     news_monitor: NewsMonitor,
@@ -195,12 +234,14 @@ def market_scan(
     scalp_enabled = risk_profile in {"normal", "high"}
     blocked_by_news = news.blocks_new_positions
 
+    bullruns = {pair: bullrun_candidate(analyses[pair], scalp_analyses[pair], risk_profile) for pair in pairs}
     ranked = sorted(
         pairs,
         key=lambda pair: (
-            1 if scalp_enabled and scalp_analyses[pair].signal else 0,
+            2 if bullruns[pair] else (1 if scalp_enabled and scalp_analyses[pair].signal else 0),
             scalp_analyses[pair].score,
             analyses[pair].score,
+            analyses[pair].volume_ratio_15m,
         ),
         reverse=True,
     )
@@ -214,13 +255,15 @@ def market_scan(
             and not blocked_by_news
         )
         scalp_signal = scalp_enabled and scalp_analyses[pair].signal and not blocked_by_news
-        signals[pair] = scalp_signal or swing_signal
-        strategies[pair] = "scalp" if scalp_signal else "swing"
+        bullrun_signal = bullruns[pair] and not blocked_by_news
+        signals[pair] = bullrun_signal or scalp_signal or swing_signal
+        strategies[pair] = "bullrun" if bullrun_signal else ("scalp" if scalp_signal else "swing")
 
     scalp_signal_text = ",".join(pair for pair in ranked if scalp_enabled and scalp_analyses[pair].signal) or "none"
+    bullrun_text = ",".join(pair for pair in ranked if bullruns[pair]) or "none"
     context = (
         f"threshold={swing_threshold};risk={risk_profile};btc_regime={btc_regime};"
-        f"news={news.score:.2f};headlines={news.fresh_headlines};scalp={scalp_signal_text}"
+        f"news={news.score:.2f};headlines={news.fresh_headlines};scalp={scalp_signal_text};bullrun={bullrun_text}"
     )
     return signals, analyses, scalp_analyses, strategies, context
 
@@ -310,6 +353,20 @@ def main() -> None:
 
             runtime_settings = dict(settings or {})
             runtime_settings["trade_cap_usdc"] = str(max(available_balance, Decimal("5")))
+            stop_overrides: dict[str, Decimal] = {}
+            activation_overrides: dict[str, Decimal] = {}
+            size_multipliers: dict[str, Decimal] = {}
+            max_hold_overrides: dict[str, int] = {}
+            for pair, strategy in strategies.items():
+                if strategy == "bullrun":
+                    stop, activation, size_multiplier = bullrun_profile(
+                        analyses[pair], (settings or {}).get("stop_loss_percent", "1"), risk_profile
+                    )
+                    stop_overrides[pair] = stop
+                    activation_overrides[pair] = activation
+                    size_multipliers[pair] = size_multiplier
+                    max_hold_overrides[pair] = BULLRUN_MAX_HOLD_SECONDS
+
             result = run_portfolio_cycle(
                 client,
                 signals,
@@ -319,6 +376,10 @@ def main() -> None:
                 allow_new_entries=allow_new_entries,
                 quote_asset=quote_asset,
                 entry_strategies=strategies,
+                entry_stop_fractions=stop_overrides,
+                entry_target_fractions=activation_overrides,
+                entry_size_multipliers=size_multipliers,
+                entry_max_hold_seconds=max_hold_overrides,
             )
             if not allow_new_entries and result == "paused_new_entries":
                 LOG.info("new entries paused; no open position requires management")
