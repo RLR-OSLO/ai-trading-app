@@ -99,6 +99,67 @@ def free_quote_balance(client: BinanceSpotClient, quote_asset: str) -> Decimal:
     return Decimal("0")
 
 
+def binance_account_summary(client: BinanceSpotClient, quote_asset: str) -> tuple[str, Decimal, Decimal]:
+    account = client.account()
+    balances = {
+        str(row.get("asset")): Decimal(str(row.get("free", "0"))) + Decimal(str(row.get("locked", "0")))
+        for row in account.get("balances", [])
+        if Decimal(str(row.get("free", "0"))) + Decimal(str(row.get("locked", "0"))) > 0
+    }
+    tickers = client._request("GET", "/api/v3/ticker/price")
+    prices = {str(row.get("symbol")): Decimal(str(row.get("price", "0"))) for row in tickers}
+
+    def in_quote(asset: str) -> Decimal | None:
+        if asset == quote_asset:
+            return Decimal("1")
+        direct = prices.get(f"{asset}{quote_asset}")
+        if direct and direct > 0:
+            return direct
+        if quote_asset == "USDC":
+            if asset == "USDT":
+                usdt_usdc = prices.get("USDTUSDC")
+                if usdt_usdc and usdt_usdc > 0:
+                    return usdt_usdc
+                usdc_usdt = prices.get("USDCUSDT")
+                if usdc_usdt and usdc_usdt > 0:
+                    return Decimal("1") / usdc_usdt
+            via_usdt = prices.get(f"{asset}USDT")
+            usdc_usdt = prices.get("USDCUSDT")
+            if via_usdt and via_usdt > 0 and usdc_usdt and usdc_usdt > 0:
+                return via_usdt / usdc_usdt
+            via_btc = prices.get(f"{asset}BTC")
+            btc_quote = prices.get("BTCUSDC")
+            if via_btc and via_btc > 0 and btc_quote and btc_quote > 0:
+                return via_btc * btc_quote
+        elif quote_asset == "USDT":
+            if asset == "USDC":
+                usdc_usdt = prices.get("USDCUSDT")
+                if usdc_usdt and usdc_usdt > 0:
+                    return usdc_usdt
+            via_usdc = prices.get(f"{asset}USDC")
+            usdc_usdt = prices.get("USDCUSDT")
+            if via_usdc and via_usdc > 0 and usdc_usdt and usdc_usdt > 0:
+                return via_usdc * usdc_usdt
+            via_btc = prices.get(f"{asset}BTC")
+            btc_quote = prices.get("BTCUSDT")
+            if via_btc and via_btc > 0 and btc_quote and btc_quote > 0:
+                return via_btc * btc_quote
+        return None
+
+    total = Decimal("0")
+    invested = Decimal("0")
+    for asset, quantity in balances.items():
+        conversion = in_quote(asset)
+        if conversion is None:
+            continue
+        value = quantity * conversion
+        total += value
+        if asset != quote_asset:
+            invested += value
+    balance_text = ",".join(f"{asset}:{quantity}" for asset, quantity in balances.items()) or "none"
+    return balance_text, total, invested
+
+
 def market_scan(
     client: BinanceSpotClient,
     news_monitor: NewsMonitor,
@@ -236,17 +297,12 @@ def main() -> None:
                     ),
                 )
                 price_text = ",".join(f"{pair}:{client.ticker_price(pair)}" for pair in pairs)
-                account_snapshot = client.account()
-                balances_text = ",".join(
-                    f"{row.get('asset')}:{Decimal(str(row.get('free','0'))) + Decimal(str(row.get('locked','0')))}"
-                    for row in account_snapshot.get("balances", [])
-                    if Decimal(str(row.get("free", "0"))) + Decimal(str(row.get("locked", "0"))) > 0
-                )
+                balances_text, account_total, invested_value = binance_account_summary(client, quote_asset)
                 reporter.record_event(
                     "heartbeat",
                     f"live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
                     f"signals={signal_text};scores={score_text};scalp_scores={scalp_score_text};"
-                    f"prices={price_text};balances={balances_text};markets={','.join(pairs)};"
+                    f"prices={price_text};balances={balances_text};account_total={account_total};invested_value={invested_value};markets={','.join(pairs)};"
                     f"best={best_pair}:{strategies[best_pair]}:{analyses[best_pair].score}/{scalp_analyses[best_pair].score};"
                     f"reasons={','.join(scalp_analyses[best_pair].reasons if strategies[best_pair] == 'scalp' else analyses[best_pair].reasons)}",
                 )
