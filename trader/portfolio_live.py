@@ -461,12 +461,20 @@ def run_portfolio_cycle(
                 notes.append(f"trailing_raise:{position.symbol}:peak={new_peak}:stop={new_stop}")
                 continue
             trailing_stop = Decimal(position.trailing_stop_price or old_stop)
-            if current <= trailing_stop and position.protective_order_list_id is None:
+            if current <= trailing_stop:
+                if position.protective_order_list_id is not None:
+                    if not _cancel_protection(client, state, state_path, position):
+                        notes.append(f"trailing_stop_cancel_failed:{position.symbol}")
+                        continue
                 return _market_sell(client, state, state_path, position, limits, report_trade, now, "trailing_stop")
             notes.append(f"trailing_hold:{position.symbol}:peak={peak}:stop={trailing_stop}")
             continue
 
-        if current <= hard_stop and position.protective_order_list_id is None:
+        if current <= hard_stop:
+            if position.protective_order_list_id is not None:
+                if not _cancel_protection(client, state, state_path, position):
+                    notes.append(f"hard_stop_cancel_failed:{position.symbol}")
+                    continue
             return _market_sell(client, state, state_path, position, limits, report_trade, now, "hard_stop")
 
         if position.protective_order_list_id is None and _protection_enabled():
