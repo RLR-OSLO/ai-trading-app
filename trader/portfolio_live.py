@@ -281,12 +281,45 @@ def _install_protection(client, state, path, position, stop: Decimal, target: De
 
 
 def _cancel_protection(client, state, path, position: Position) -> bool:
-    if position.protective_order_list_id is None:
+    if position.protective_order_list_id is None and not position.protective_order_ids:
         return True
-    try:
-        client.cancel_order_list(symbol=position.symbol, order_list_id=position.protective_order_list_id)
-    except BinanceError:
-        return False
+    cancelled = False
+    if position.protective_order_list_id is not None:
+        try:
+            client.cancel_order_list(symbol=position.symbol, order_list_id=position.protective_order_list_id)
+            cancelled = True
+        except BinanceError:
+            pass
+    if not cancelled:
+        try:
+            open_orders = client.open_orders(symbol=position.symbol)
+        except BinanceError:
+            return False
+        bot_orders = [
+            order for order in open_orders
+            if str(order.get("clientOrderId") or "").startswith("ait-")
+            or int(order.get("orderId", -1)) in set(position.protective_order_ids)
+            or (position.protective_order_list_id is not None and int(order.get("orderListId", -1)) == position.protective_order_list_id)
+        ]
+        for order in bot_orders:
+            order_id = int(order.get("orderId", -1))
+            if order_id < 0:
+                continue
+            try:
+                client.cancel_order(symbol=position.symbol, order_id=order_id)
+                cancelled = True
+            except BinanceError:
+                continue
+        try:
+            still_open = client.open_orders(symbol=position.symbol)
+        except BinanceError:
+            return False
+        blocked_ids = set(position.protective_order_ids)
+        for order in still_open:
+            if (str(order.get("clientOrderId") or "").startswith("ait-")
+                or int(order.get("orderId", -1)) in blocked_ids
+                or (position.protective_order_list_id is not None and int(order.get("orderListId", -1)) == position.protective_order_list_id)):
+                return False
     position.protective_order_list_id = None
     position.protective_order_ids = ()
     save_state(path, state)
@@ -447,9 +480,11 @@ def _reconcile(client, state, path, quote, limits, report_trade):
 
 
 def _market_sell(client, state, state_path, position, limits, report_trade, now: int, reason: str) -> str:
-    quantity = _sellable_quantity(client, position.symbol, Decimal(position.quantity))
+    base_asset = position.symbol.removesuffix("USDC") if position.symbol.endswith("USDC") else position.symbol.removesuffix("USDT")
+    free_balance = _free_balance(client, base_asset)
+    quantity = _sellable_quantity(client, position.symbol, min(Decimal(position.quantity), free_balance))
     if quantity <= 0:
-        return f"unsellable:{position.symbol}"
+        return f"unsellable:{position.symbol}:free={free_balance}"
     client_id = _client_id("SELL", position.symbol, now)
     state.pending_action = f"SELL:{position.symbol}"
     state.pending_client_order_id = client_id
