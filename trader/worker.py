@@ -10,7 +10,7 @@ from .analysis import MarketAnalysis, analyze_market, bullish_btc_regime
 from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
 from .config import DEFAULT_CONFIG
 from .news import NewsMonitor
-from .portfolio_live import PortfolioLimits, run_portfolio_cycle
+from .portfolio_live import PortfolioLimits, recover_positions_from_trade_history, run_portfolio_cycle
 from .reporting import SupabaseReporter
 from .scalping import ScalpAnalysis, analyze_scalp
 
@@ -186,6 +186,13 @@ def main() -> None:
             authenticated = readiness_check(client)
             pairs = active_pairs(client, quote_asset)
             available_balance = free_quote_balance(client, quote_asset) if authenticated else Decimal("0")
+            if authenticated and reporter:
+                recovered = recover_positions_from_trade_history(
+                    client, state_path, reporter.get_recent_trades(), quote_asset
+                )
+                if recovered:
+                    reporter.record_event("state_recovered", f"recovered={','.join(recovered)}", "warning")
+                    LOG.warning("recovered missing positions from trade history: %s", ",".join(recovered))
             LOG.info(
                 "health check passed; authenticated_account_read=%s; available_%s=%s; active_pairs=%s",
                 authenticated,

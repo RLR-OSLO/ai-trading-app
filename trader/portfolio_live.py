@@ -319,6 +319,87 @@ def _check_protection(client, state, path, position, limits, report_trade):
     return None
 
 
+def recover_positions_from_trade_history(
+    client: BinanceSpotClient,
+    state_path: Path,
+    trades: list[dict[str, Any]],
+    quote_asset: str,
+) -> list[str]:
+    """Restore missing bot positions from recorded live trades and actual Binance balances."""
+    state = load_state(state_path)
+    existing = {p.symbol for p in state.positions or []}
+    lots: dict[str, dict[str, Any]] = {}
+    for trade in trades:
+        symbol = str(trade.get("symbol") or "")
+        if not symbol.endswith(quote_asset):
+            continue
+        qty = Decimal(str(trade.get("quantity") or "0"))
+        if qty <= 0:
+            continue
+        lot = lots.setdefault(symbol, {"qty": Decimal("0"), "cost": Decimal("0"), "opened_at": 0})
+        if str(trade.get("side") or "").upper() == "BUY":
+            price = Decimal(str(trade.get("entry_price") or "0"))
+            lot["qty"] += qty
+            lot["cost"] += qty * price
+            created = str(trade.get("created_at") or "")
+            try:
+                lot["opened_at"] = max(lot["opened_at"], int(datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()))
+            except ValueError:
+                pass
+        elif str(trade.get("side") or "").upper() == "SELL" and lot["qty"] > 0:
+            sold = min(qty, lot["qty"])
+            avg = lot["cost"] / lot["qty"] if lot["qty"] > 0 else Decimal("0")
+            lot["qty"] -= sold
+            lot["cost"] = max(Decimal("0"), lot["cost"] - sold * avg)
+            if lot["qty"] <= Decimal("0.00000001"):
+                lot["qty"] = Decimal("0")
+                lot["cost"] = Decimal("0")
+
+    account = client.account()
+    balances = {
+        str(row.get("asset")): Decimal(str(row.get("free", "0"))) + Decimal(str(row.get("locked", "0")))
+        for row in account.get("balances", [])
+    }
+    recovered: list[str] = []
+    now = int(time.time())
+    for symbol, lot in lots.items():
+        if symbol in existing or lot["qty"] <= Decimal("0.00000001"):
+            continue
+        base = symbol.removesuffix(quote_asset)
+        wallet_qty = balances.get(base, Decimal("0"))
+        quantity = min(lot["qty"], wallet_qty)
+        if quantity <= Decimal("0.00000001"):
+            continue
+        avg_price = lot["cost"] / lot["qty"] if lot["qty"] > 0 else Decimal("0")
+        if avg_price <= 0:
+            continue
+        position = Position(
+            symbol=symbol,
+            quantity=str(quantity),
+            entry_price=str(avg_price),
+            quote_spent=str(quantity * avg_price),
+            opened_at=int(lot["opened_at"] or now),
+            strategy="swing",
+        )
+        try:
+            open_orders = client.open_orders(symbol=symbol)
+            bot_orders = [o for o in open_orders if str(o.get("clientOrderId") or "").startswith("ait-")]
+            list_ids = [int(o.get("orderListId")) for o in bot_orders if int(o.get("orderListId", -1)) >= 0]
+            if list_ids:
+                list_id = list_ids[0]
+                position.protective_order_list_id = list_id
+                position.protective_order_ids = tuple(
+                    int(o["orderId"]) for o in bot_orders if int(o.get("orderListId", -1)) == list_id and o.get("orderId") is not None
+                )
+        except BinanceError:
+            pass
+        state.positions.append(position)
+        recovered.append(symbol)
+    if recovered:
+        save_state(state_path, state)
+    return recovered
+
+
 def _reconcile(client, state, path, quote, limits, report_trade):
     if not state.pending_action:
         return None

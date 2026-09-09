@@ -55,6 +55,25 @@ class SupabaseReporter:
             raise RuntimeError(f"Supabase settings read failed ({exc.code}): {detail}") from exc
         return rows[0] if rows else None
 
+    def get_recent_trades(self, limit: int = 1000) -> list[dict[str, Any]]:
+        query = urllib.parse.urlencode({
+            "user_id": f"eq.{self.user_id}",
+            "mode": "eq.live",
+            "select": "symbol,side,quantity,entry_price,created_at",
+            "order": "created_at.asc",
+            "limit": str(limit),
+        })
+        request = urllib.request.Request(
+            f"{self.url}/rest/v1/trades?{query}",
+            headers={"apikey": self.service_role_key, "Authorization": f"Bearer {self.service_role_key}"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Supabase trades read failed ({exc.code}): {detail}") from exc
+
     def record_trade(self, payload: dict[str, Any]) -> None:
         self._insert("trades", {**payload, "mode": "live"})
 
