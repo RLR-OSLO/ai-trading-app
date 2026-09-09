@@ -1,0 +1,1 @@
+Wallet highlighting is driven by actual Binance wallet values, not active-market price availability. Liquidity screening targets up to 12 markets with hard floors of 5M quote volume, 5,000 trades/day, and 20 bps max spread.
