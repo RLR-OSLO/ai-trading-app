@@ -90,13 +90,26 @@ export default function TradingDashboard() {
     return balances;
   }, [lastEvent]);
 
+  const binanceWalletValues = useMemo(() => {
+    const values = new Map<string, number>();
+    const match = lastEvent?.message.match(/(?:^|;)wallet_values=([^;]+)/);
+    if (!match) return values;
+    for (const item of match[1].split(",")) {
+      const [asset, rawValue] = item.split(":");
+      const value = Number(rawValue);
+      if (asset && Number.isFinite(value)) values.set(asset, value);
+    }
+    return values;
+  }, [lastEvent]);
+
   const assets = useMemo(() => {
     const suffix = settings.quote_asset;
     const names = new Set<string>(MARKET_UNIVERSE);
     for (const symbol of marketPrices.keys()) if (symbol.endsWith(suffix)) names.add(symbol.slice(0, -suffix.length));
     for (const trade of trades) if (trade.symbol.endsWith(suffix)) names.add(trade.symbol.slice(0, -suffix.length));
+    for (const [asset, value] of binanceWalletValues.entries()) if (asset !== suffix && value >= 5) names.add(asset);
     return Array.from(names);
-  }, [marketPrices, settings.quote_asset, trades]);
+  }, [marketPrices, settings.quote_asset, trades, binanceWalletValues]);
 
   const allocations = useMemo(() => assets.map((asset) => {
     const symbol = `${asset}${settings.quote_asset}`;
@@ -119,13 +132,17 @@ export default function TradingDashboard() {
     }
     const pnl = assetTrades.reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
     const walletQuantity = binanceBalances.has(asset) ? Number(binanceBalances.get(asset)) : quantity;
-    const authoritativeQuantity = walletQuantity * (marketPrices.get(symbol) ?? 0) >= 5 ? walletQuantity : 0;
-    const currentPrice = marketPrices.get(symbol) ?? null;
-    const currentValue = currentPrice === null ? null : authoritativeQuantity * currentPrice;
+    const walletValue = binanceWalletValues.get(asset);
+    const fallbackPrice = marketPrices.get(symbol) ?? null;
+    const resolvedValue = walletValue !== undefined ? walletValue : (fallbackPrice === null ? null : walletQuantity * fallbackPrice);
+    const owned = walletQuantity > 0.000000001 && resolvedValue !== null && resolvedValue >= 5;
+    const authoritativeQuantity = owned ? walletQuantity : 0;
+    const currentValue = owned ? resolvedValue : 0;
+    const currentPrice = authoritativeQuantity > 0 && currentValue !== null ? currentValue / authoritativeQuantity : fallbackPrice;
     const adjustedInvested = quantity > 0 && authoritativeQuantity > 0 ? invested * Math.min(1, authoritativeQuantity / quantity) : 0;
     const unrealized = currentValue === null ? null : currentValue - adjustedInvested;
-    return { asset, invested: adjustedInvested, quantity: authoritativeQuantity, pnl, currentPrice, currentValue, unrealized, owned: authoritativeQuantity > 0.000000001 };
-  }).sort((a, b) => Number(b.owned) - Number(a.owned) || MARKET_UNIVERSE.indexOf(a.asset as typeof MARKET_UNIVERSE[number]) - MARKET_UNIVERSE.indexOf(b.asset as typeof MARKET_UNIVERSE[number])), [assets, settings.quote_asset, trades, marketPrices, binanceBalances]);
+    return { asset, invested: adjustedInvested, quantity: authoritativeQuantity, pnl, currentPrice, currentValue, unrealized, owned };
+  }).sort((a, b) => Number(b.owned) - Number(a.owned) || Number(b.currentValue ?? 0) - Number(a.currentValue ?? 0) || MARKET_UNIVERSE.indexOf(a.asset as typeof MARKET_UNIVERSE[number]) - MARKET_UNIVERSE.indexOf(b.asset as typeof MARKET_UNIVERSE[number])), [assets, settings.quote_asset, trades, marketPrices, binanceBalances, binanceWalletValues]);
 
   const availableCapital = useMemo(() => {
     const walletValue = binanceBalances.get(settings.quote_asset);
