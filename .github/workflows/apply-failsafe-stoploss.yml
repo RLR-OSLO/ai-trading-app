@@ -1,0 +1,29 @@
+name: Apply fail-safe stop-loss patch
+
+on:
+  push:
+    branches:
+      - fix/failsafe-stoploss-release
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/failsafe-stoploss-release
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/apply_failsafe_stoploss.py
+      - name: Commit patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Add fail-safe OCO release for stop-loss'
+          git push
