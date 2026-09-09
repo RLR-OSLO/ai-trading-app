@@ -5,7 +5,7 @@ import TradingDashboard from "./trading-dashboard";
 export default function Dashboard() {
   return (
     <AuthGate>
-      <AdminUsers />
+      <div className="admin-shell"><AdminUsers /></div>
       <TradingDashboard />
     </AuthGate>
   );
