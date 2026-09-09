@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
+import HowItWorks from "./how-it-works";
 
 type Settings = {
   bot_enabled: boolean;
@@ -251,6 +252,7 @@ export default function TradingDashboard() {
       <form className="chat-form" onSubmit={(event) => { event.preventDefault(); void sendChat(); }}><input aria-label="Skriv til botten" value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder="F.eks. «Hva er status?»" /><button className="primary" type="submit">Send</button></form>
       <p className="chat-note">Chatten kan lese status og pause botten. Direkte ordre fra fritekst er sperret.</p>
     </section>
+    <HowItWorks />
   </main>;
 }
 
