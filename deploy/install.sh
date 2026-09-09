@@ -46,6 +46,15 @@ chmod 755 "${APP_DIR}/deploy/install.sh"
 if [[ ! -f "${ENV_FILE}" ]]; then
   cp "${APP_DIR}/.env.example" "${ENV_FILE}"
 fi
+
+# Local stop-loss/trailing is authoritative. Disable Binance OCO protection even
+# on servers that still have the legacy EXCHANGE_PROTECTION_ENABLED=true value.
+if grep -q '^EXCHANGE_PROTECTION_ENABLED=' "${ENV_FILE}"; then
+  sed -i 's/^EXCHANGE_PROTECTION_ENABLED=.*/EXCHANGE_PROTECTION_ENABLED=false/' "${ENV_FILE}"
+else
+  printf '\nEXCHANGE_PROTECTION_ENABLED=false\n' >> "${ENV_FILE}"
+fi
+
 chown root:trader "${ENV_FILE}"
 chmod 640 "${ENV_FILE}"
 
