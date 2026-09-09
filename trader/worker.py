@@ -235,7 +235,12 @@ def market_scan(
 
     swing_threshold = RISK_THRESHOLDS.get(risk_profile, RISK_THRESHOLDS["normal"])
     scalp_enabled = risk_profile in {"normal", "high"}
-    blocked_by_news = news.blocks_new_positions
+    # Generic negative crypto headlines used to veto every new entry, which made the
+    # daytrader unnecessarily idle even when individual markets had strong signals.
+    # Low risk keeps the hard veto. Normal/high instead require one extra swing point.
+    hard_news_block = news.blocks_new_positions and risk_profile == "low"
+    news_penalty = 1 if news.blocks_new_positions and risk_profile in {"normal", "high"} else 0
+    effective_swing_threshold = swing_threshold + news_penalty
 
     bullruns = {pair: bullrun_candidate(analyses[pair], scalp_analyses[pair], risk_profile) for pair in pairs}
     ranked = sorted(
@@ -253,20 +258,20 @@ def market_scan(
     strategies: dict[str, str] = {}
     for pair in ranked:
         swing_signal = (
-            analyses[pair].score >= swing_threshold
+            analyses[pair].score >= effective_swing_threshold
             and "risk_veto" not in analyses[pair].reasons
-            and not blocked_by_news
+            and not hard_news_block
         )
-        scalp_signal = scalp_enabled and scalp_analyses[pair].signal and not blocked_by_news
-        bullrun_signal = bullruns[pair] and not blocked_by_news
+        scalp_signal = scalp_enabled and scalp_analyses[pair].signal and not hard_news_block
+        bullrun_signal = bullruns[pair] and not hard_news_block
         signals[pair] = bullrun_signal or scalp_signal or swing_signal
         strategies[pair] = "bullrun" if bullrun_signal else ("scalp" if scalp_signal else "swing")
 
     scalp_signal_text = ",".join(pair for pair in ranked if scalp_enabled and scalp_analyses[pair].signal) or "none"
     bullrun_text = ",".join(pair for pair in ranked if bullruns[pair]) or "none"
     context = (
-        f"threshold={swing_threshold};risk={risk_profile};btc_regime={btc_regime};"
-        f"news={news.score:.2f};headlines={news.fresh_headlines};scalp={scalp_signal_text};bullrun={bullrun_text}"
+        f"threshold={effective_swing_threshold};base_threshold={swing_threshold};risk={risk_profile};btc_regime={btc_regime};"
+        f"news={news.score:.2f};news_penalty={news_penalty};headlines={news.fresh_headlines};scalp={scalp_signal_text};bullrun={bullrun_text}"
     )
     return signals, analyses, scalp_analyses, strategies, context
 

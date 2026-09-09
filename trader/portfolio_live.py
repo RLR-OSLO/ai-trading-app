@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from .binance import BinanceError, BinanceSpotClient
 
-PROFILE_LIMITS = {"low": (6, 1800, 1), "normal": (16, 300, 3), "high": (80, 15, 5)}
+PROFILE_LIMITS = {"low": (6, 1800, 1), "normal": (24, 180, 4), "high": (100, 15, 8)}
 SCALP_STOP_FRACTION = Decimal("0.0045")
 SCALP_TARGET_FRACTION = Decimal("0.0075")
 SCALP_MAX_HOLD_SECONDS = 900
@@ -117,8 +117,8 @@ class PortfolioLimits:
         daily_loss = Decimal(str(daily_loss_value))
         if cap < Decimal("5"):
             raise ValueError("Available trading capital must be at least 5 quote units")
-        if not (Decimal("5") <= order <= cap):
-            raise ValueError("LIVE_ORDER_USDC must be between 5 and available trading capital")
+        if order < Decimal("5"):
+            raise ValueError("LIVE_ORDER_USDC must be at least 5 quote units")
         if not (Decimal("0.0025") <= stop <= Decimal("0.10")):
             raise ValueError("LIVE_STOP_PERCENT is outside the safety range")
         if not (Decimal("0.005") <= target <= Decimal("0.25")):
@@ -651,7 +651,7 @@ def run_portfolio_cycle(
     if not candidates:
         return ";".join(notes) if notes else "no_signal"
     free_quote = _free_balance(client, quote)
-    if free_quote < limits.order_size:
+    if free_quote < Decimal("5"):
         return f"insufficient_{quote.lower()}"
 
     symbol = candidates[0]
@@ -666,8 +666,9 @@ def run_portfolio_cycle(
         max_hold = (entry_max_hold_seconds or {}).get(symbol)
 
     multiplier = max(Decimal("0.5"), min(Decimal("1.5"), Decimal(str((entry_size_multipliers or {}).get(symbol, Decimal("1"))))))
-    max_fraction_of_free = Decimal("0.35")
-    spend = min(limits.order_size * multiplier, free_quote * max_fraction_of_free, free_quote)
+    # order_size is the user's maximum amount per investment. Risk presets provide
+    # a sensible default, but a manual override is honored up to the actual free balance.
+    spend = min(limits.order_size * multiplier, free_quote)
     if spend < Decimal("5"):
         return f"insufficient_{quote.lower()}_for_sized_entry"
     client.test_market_buy(symbol=symbol, quote_quantity=spend)
