@@ -1,5 +1,5 @@
 [Unit]
-Description=AI Trading App monitor
+Description=AI Trading App multi-user manager
 After=network-online.target
 Wants=network-online.target
 
@@ -10,7 +10,7 @@ Group=trader
 WorkingDirectory=/opt/ai-trading-app
 EnvironmentFile=/etc/ai-trading-app.env
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/usr/bin/python3 -m trader.worker
+ExecStart=/usr/bin/python3 -m trader.manager
 Restart=always
 RestartSec=10
 NoNewPrivileges=true
