@@ -1,0 +1,27 @@
+name: Tune activity and manual order cap
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'Run activity and manual order cap tuning'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/tune_activity_and_manual_order_cap.py
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add trader/worker.py trader/portfolio_live.py app/trading-dashboard.tsx
+          git commit -m "Tune daytrading activity and manual order cap" || exit 0
+          git push
