@@ -4,21 +4,41 @@ import { useCallback, useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
 import ExchangeOnboarding from "./exchange-onboarding";
 
-type GateState = "loading" | "signed-out" | "ready" | "error";
+type GateState = "loading" | "signed-out" | "pending" | "ready" | "error";
 
 export default function AuthGate({ children }: Readonly<{ children: React.ReactNode }>) {
   const [state, setState] = useState<GateState>("loading");
   const [message, setMessage] = useState("");
+  const [email, setEmail] = useState("");
 
   const refresh = useCallback(async () => {
     setState("loading");
+    setMessage("");
     const { data, error } = await supabase.auth.getSession();
     if (error) {
       setMessage(error.message);
       setState("error");
       return;
     }
-    setState(data.session ? "ready" : "signed-out");
+    const session = data.session;
+    if (!session) {
+      setState("signed-out");
+      return;
+    }
+
+    setEmail(session.user.email ?? "");
+    const { data: access, error: accessError } = await supabase
+      .from("user_access")
+      .select("approved")
+      .eq("user_id", session.user.id)
+      .maybeSingle();
+
+    if (accessError) {
+      setMessage(accessError.message);
+      setState("error");
+      return;
+    }
+    setState(access?.approved ? "ready" : "pending");
   }, []);
 
   useEffect(() => {
@@ -36,13 +56,25 @@ export default function AuthGate({ children }: Readonly<{ children: React.ReactN
     if (error) setMessage(error.message);
   }
 
+  async function signOut() {
+    await supabase.auth.signOut();
+    setState("signed-out");
+  }
+
   if (state === "ready") return <ExchangeOnboarding>{children}</ExchangeOnboarding>;
 
   return <main className="gate-shell"><section className="gate-card">
-    <p className="eyebrow">AI TRADING APP</p><h1>Logg inn</h1>
-    {state === "loading" && <p className="muted">Kontrollerer innlogging …</p>}
-    {state === "signed-out" && <><p className="muted">Logg inn med Google. Hver bruker får sitt eget separate dashboard og sin egen Binance-konto.</p><button className="primary" onClick={() => void signIn()}>Fortsett med Google</button></>}
-    {state === "error" && <button className="primary" onClick={() => void refresh()}>Prøv igjen</button>}
+    <p className="eyebrow">AI TRADING APP</p>
+    {state === "pending" ? <>
+      <h1>Venter på godkjenning</h1>
+      <p className="muted">{email || "Denne Google-kontoen"} er registrert. Administrator må godkjenne brukeren før Binance-oppsett og trading blir tilgjengelig.</p>
+      <div className="gate-actions"><button className="secondary" onClick={() => void signOut()}>Logg ut</button><button className="primary" onClick={() => void refresh()}>Sjekk igjen</button></div>
+    </> : <>
+      <h1>Logg inn</h1>
+      {state === "loading" && <p className="muted">Kontrollerer innlogging …</p>}
+      {state === "signed-out" && <><p className="muted">Logg inn med Google. Hver bruker får sitt eget separate dashboard og sin egen Binance-konto.</p><button className="primary" onClick={() => void signIn()}>Fortsett med Google</button></>}
+      {state === "error" && <button className="primary" onClick={() => void refresh()}>Prøv igjen</button>}
+    </>}
     {message && <p className="gate-error" role="alert">{message}</p>}
   </section></main>;
 }
