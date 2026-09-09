@@ -38,6 +38,7 @@ export default function AdminUsers() {
       .from("user_access")
       .select("user_id,email,approved,rejected,is_admin,created_at")
       .eq("is_admin", false)
+      .eq("rejected", false)
       .order("created_at", { ascending: false });
     if (error) setMessage(error.message);
     else setRows((data ?? []) as AccessRow[]);
@@ -76,8 +77,8 @@ export default function AdminUsers() {
       .eq("user_id", row.user_id);
     if (error) setMessage(error.message);
     else {
-      setRows((current) => current.map((item) => item.user_id === row.user_id ? { ...item, approved: false, rejected: true } : item));
-      setMessage(`${row.email} er avslått.`);
+      setRows((current) => current.filter((item) => item.user_id !== row.user_id));
+      setMessage(`${row.email} er avslått og fjernet fra oversikten.`);
     }
     setBusy(null);
   }
@@ -90,11 +91,11 @@ export default function AdminUsers() {
       <div><p className="eyebrow">ADMIN</p><h3>Brukere</h3></div>
       <span className="muted">Nye brukere må godkjennes før de får tilgang til Binance-oppsett og trading.</span>
     </div>
-    {loading ? <p className="muted">Henter brukere …</p> : rows.length === 0 ? <p className="muted">Ingen andre brukere ennå.</p> : <div className="admin-user-list">
+    {loading ? <p className="muted">Henter brukere …</p> : rows.length === 0 ? <p className="muted">Ingen ventende/godkjente brukere.</p> : <div className="admin-user-list">
       {rows.map((row) => <div className="admin-user-row" key={row.user_id}>
         <span className="admin-user-email">{row.email}</span>
         <div className="admin-user-actions">
-          {row.approved ? <span className="approved-badge">GODKJENT</span> : row.rejected ? <span className="rejected-badge">AVSLÅTT</span> : <>
+          {row.approved ? <span className="approved-badge">GODKJENT</span> : <>
             <button className="primary compact" disabled={busy === row.user_id} onClick={() => void approve(row)}>Godkjenn</button>
             <button className="danger compact" disabled={busy === row.user_id} onClick={() => void reject(row)}>Avslå</button>
           </>}
