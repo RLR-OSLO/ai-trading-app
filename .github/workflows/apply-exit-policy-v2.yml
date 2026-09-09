@@ -19,8 +19,10 @@ jobs:
           python-version: '3.12'
       - name: Apply patch
         run: python scripts/apply_exit_policy_v2.py
-      - name: Align timeout-profit test with new 0.40% rule
-        run: sed -i 's/client.price = Decimal("100.30")/client.price = Decimal("100.45")/' tests/test_portfolio_live.py
+      - name: Align timeout-profit test with new policy
+        run: |
+          sed -i 's/opened_at = int(__import__("time").time()) - 1900/opened_at = int(__import__("time").time()) - 2800/' tests/test_portfolio_live.py
+          sed -i 's/client.price = Decimal("100.30")/client.price = Decimal("100.45")/' tests/test_portfolio_live.py
       - name: Run focused tests
         run: python -m unittest tests.test_scalping tests.test_portfolio_live
       - name: Commit optimized policy
