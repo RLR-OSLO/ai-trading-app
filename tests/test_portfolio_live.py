@@ -17,7 +17,11 @@ class FakeClient:
         self.last_oco_kwargs = None
 
     def account(self):
-        return {"balances": [{"asset": "USDC", "free": "200", "locked": "0"}]}
+        return {"balances": [
+            {"asset": "USDC", "free": "200", "locked": "0"},
+            {"asset": "BTC", "free": "0.25", "locked": "0"},
+            {"asset": "ETH", "free": "0.25", "locked": "0"},
+        ]}
 
     def test_market_buy(self, **_kwargs):
         return {}
