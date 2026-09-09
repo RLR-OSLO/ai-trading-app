@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from decimal import Decimal
 from pathlib import Path
 
@@ -61,6 +62,13 @@ class FakeClient:
 
 
 class PortfolioLiveTests(unittest.TestCase):
+    def setUp(self):
+        self._protection = patch.dict("os.environ", {"EXCHANGE_PROTECTION_ENABLED": "true"})
+        self._protection.start()
+
+    def tearDown(self):
+        self._protection.stop()
+
     def limits(self):
         return PortfolioLimits.from_values("200", "25", "1", "2", "5", max_trades=80, cooldown=15, max_positions=5)
 
