@@ -12,6 +12,7 @@ type AccessRow = {
 };
 
 export default function AdminUsers() {
+  const [isAdmin, setIsAdmin] = useState(false);
   const [rows, setRows] = useState<AccessRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -19,6 +20,19 @@ export default function AdminUsers() {
 
   const load = useCallback(async () => {
     setLoading(true);
+    setMessage("");
+    const { data: userData } = await supabase.auth.getUser();
+    const userId = userData.user?.id;
+    if (!userId) { setLoading(false); return; }
+
+    const { data: ownAccess } = await supabase
+      .from("user_access")
+      .select("is_admin")
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (!ownAccess?.is_admin) { setIsAdmin(false); setLoading(false); return; }
+
+    setIsAdmin(true);
     const { data, error } = await supabase
       .from("user_access")
       .select("user_id,email,approved,is_admin,created_at")
@@ -52,6 +66,9 @@ export default function AdminUsers() {
     }
     setBusy(null);
   }
+
+  if (!loading && !isAdmin) return null;
+  if (!isAdmin) return null;
 
   return <section className="panel admin-users-panel">
     <div className="panel-head">
