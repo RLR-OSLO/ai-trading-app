@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
 import ExchangeOnboarding from "./exchange-onboarding";
 
-type GateState = "loading" | "signed-out" | "pending" | "ready" | "error";
+type GateState = "loading" | "signed-out" | "pending" | "rejected" | "ready" | "error";
 
 export default function AuthGate({ children }: Readonly<{ children: React.ReactNode }>) {
   const [state, setState] = useState<GateState>("loading");
@@ -29,7 +29,7 @@ export default function AuthGate({ children }: Readonly<{ children: React.ReactN
     setEmail(session.user.email ?? "");
     const { data: access, error: accessError } = await supabase
       .from("user_access")
-      .select("approved")
+      .select("approved,rejected")
       .eq("user_id", session.user.id)
       .maybeSingle();
 
@@ -38,7 +38,8 @@ export default function AuthGate({ children }: Readonly<{ children: React.ReactN
       setState("error");
       return;
     }
-    setState(access?.approved ? "ready" : "pending");
+    if (access?.rejected) setState("rejected");
+    else setState(access?.approved ? "ready" : "pending");
   }, []);
 
   useEffect(() => {
@@ -69,6 +70,10 @@ export default function AuthGate({ children }: Readonly<{ children: React.ReactN
       <h1>Venter på godkjenning</h1>
       <p className="muted">{email || "Denne Google-kontoen"} er registrert. Administrator må godkjenne brukeren før Binance-oppsett og trading blir tilgjengelig.</p>
       <div className="gate-actions"><button className="secondary" onClick={() => void signOut()}>Logg ut</button><button className="primary" onClick={() => void refresh()}>Sjekk igjen</button></div>
+    </> : state === "rejected" ? <>
+      <h1>Tilgang avslått</h1>
+      <p className="muted">{email || "Denne Google-kontoen"} er ikke godkjent for bruk av AI Trading App.</p>
+      <div className="gate-actions"><button className="secondary" onClick={() => void signOut()}>Logg ut</button></div>
     </> : <>
       <h1>Logg inn</h1>
       {state === "loading" && <p className="muted">Kontrollerer innlogging …</p>}
