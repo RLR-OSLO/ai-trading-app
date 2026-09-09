@@ -173,6 +173,28 @@ export default function TradingDashboard() {
 
   function update<K extends keyof Settings>(key: K, value: Settings[K]) { setSettings((current) => ({ ...current, [key]: value })); }
 
+  function applyRiskProfile(profile: Settings["risk_profile"]) {
+    const capital = Math.max(5, availableCapital);
+    const presets = {
+      low: { orderShare: 0.15, stop_loss_percent: 0.75, take_profit_percent: 1.5, dailyLossShare: 0.01 },
+      normal: { orderShare: 0.25, stop_loss_percent: 1.0, take_profit_percent: 2.0, dailyLossShare: 0.02 },
+      high: { orderShare: 0.35, stop_loss_percent: 1.5, take_profit_percent: 3.0, dailyLossShare: 0.03 },
+    } as const;
+    const preset = presets[profile];
+    const roundedOrder = Math.round((capital * preset.orderShare) * 2) / 2;
+    const roundedDailyLoss = Math.round((capital * preset.dailyLossShare) * 2) / 2;
+    setSettings((current) => ({
+      ...current,
+      risk_profile: profile,
+      trade_cap_usdc: capital,
+      order_size_usdc: Math.min(capital, Math.max(5, roundedOrder)),
+      stop_loss_percent: preset.stop_loss_percent,
+      take_profit_percent: preset.take_profit_percent,
+      max_daily_loss_usdc: Math.min(capital, Math.max(0.5, roundedDailyLoss)),
+    }));
+    setMessage(`${profile === "low" ? "Lav" : profile === "normal" ? "Normal" : "Høy"} risiko valgt. Standardverdiene er satt automatisk – trykk Lagre innstillinger for å aktivere dem.`);
+  }
+
   async function save() {
     setSaving(true); setMessage("");
     const { data: userData } = await supabase.auth.getUser();
@@ -243,7 +265,7 @@ export default function TradingDashboard() {
         <Field label="Stop-loss (%)" value={settings.stop_loss_percent} min={0.25} max={10} step={0.25} onChange={(value) => update("stop_loss_percent", value)} />
         <Field label="Gevinstmål (%)" value={settings.take_profit_percent} min={0.5} max={25} step={0.5} onChange={(value) => update("take_profit_percent", value)} />
         <Field label={`Maks dagstap (${settings.quote_asset})`} value={settings.max_daily_loss_usdc} min={0.5} max={Math.max(0.5, availableCapital)} step={0.5} onChange={(value) => update("max_daily_loss_usdc", value)} />
-        <label className="select-field"><span>Risikonivå</span><select value={settings.risk_profile} onChange={(event) => update("risk_profile", event.target.value as Settings["risk_profile"])}><option value="low">Lav</option><option value="normal">Normal</option><option value="high">Høy</option></select></label>
+        <label className="select-field"><span>Risikonivå</span><select value={settings.risk_profile} onChange={(event) => applyRiskProfile(event.target.value as Settings["risk_profile"])}><option value="low">Lav</option><option value="normal">Normal</option><option value="high">Høy</option></select><small>Bytte av risikonivå setter automatisk nye standardverdier for ordrestørrelse, stop-loss, gevinstmål og maks dagstap.</small></label>
       </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button></div>{message && <p className="inline-message">{message}</p>}
     </section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">Alle godkjente markeder · investerte posisjoner vises først</span></div><div className="assets">{allocations.map(({ asset, invested, quantity, pnl, currentPrice, currentValue, unrealized, owned }) => <div className={`asset${owned ? " invested" : ""}`} key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b>{owned && <span className="owned-badge">INVESTERT</span>}<small>Investert: {money(invested)} {settings.quote_asset} · Eier: {crypto(quantity)} {asset}</small><small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`} · Verdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`}</small></div><span className={(unrealized ?? pnl) < 0 ? "loss" : "gain"}>{unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>)}</div></section>
