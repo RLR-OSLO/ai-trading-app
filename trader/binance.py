@@ -152,6 +152,14 @@ class BinanceSpotClient:
             signed=True,
         )
 
+    def cancel_order(self, *, symbol: str, order_id: int) -> dict[str, Any]:
+        return self._request(
+            "DELETE",
+            "/api/v3/order",
+            {"symbol": symbol, "orderId": order_id},
+            signed=True,
+        )
+
     def test_market_buy(self, *, symbol: str, quote_quantity: Decimal) -> dict[str, Any]:
         return self._request(
             "POST",
