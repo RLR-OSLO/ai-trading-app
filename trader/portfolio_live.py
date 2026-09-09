@@ -235,7 +235,7 @@ def _client_id(side: str, symbol: str, now: int) -> str:
 
 
 def _protection_enabled() -> bool:
-    return os.getenv("EXCHANGE_PROTECTION_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("EXCHANGE_PROTECTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _position_limits(position: Position, limits: PortfolioLimits) -> tuple[Decimal, Decimal]:
@@ -481,10 +481,22 @@ def _reconcile(client, state, path, quote, limits, report_trade):
 
 def _market_sell(client, state, state_path, position, limits, report_trade, now: int, reason: str) -> str:
     base_asset = position.symbol.removesuffix("USDC") if position.symbol.endswith("USDC") else position.symbol.removesuffix("USDT")
-    free_balance = _free_balance(client, base_asset)
+    account = client.account()
+    free_balance = Decimal("0")
+    total_balance = Decimal("0")
+    for row in account.get("balances", []):
+        if row.get("asset") == base_asset:
+            free_balance = Decimal(str(row.get("free", "0")))
+            total_balance = free_balance + Decimal(str(row.get("locked", "0")))
+            break
     quantity = _sellable_quantity(client, position.symbol, min(Decimal(position.quantity), free_balance))
     if quantity <= 0:
-        return f"unsellable:{position.symbol}:free={free_balance}"
+        total_sellable = _sellable_quantity(client, position.symbol, min(Decimal(position.quantity), total_balance))
+        if total_sellable <= 0:
+            _remove(state, position.symbol)
+            save_state(state_path, state)
+            return f"stale_removed:{position.symbol}:free={free_balance}:total={total_balance}"
+        return f"unsellable_locked:{position.symbol}:free={free_balance}:total={total_balance}"
     client_id = _client_id("SELL", position.symbol, now)
     state.pending_action = f"SELL:{position.symbol}"
     state.pending_client_order_id = client_id
@@ -517,6 +529,12 @@ def run_portfolio_cycle(
 
     notes: list[str] = []
     for position in list(state.positions or []):
+        if not _protection_enabled() and (position.protective_order_list_id is not None or position.protective_order_ids):
+            if not _cancel_protection(client, state, state_path, position):
+                notes.append(f"local_stop_release_failed:{position.symbol}")
+                continue
+            notes.append(f"local_stop_protection_removed:{position.symbol}")
+
         expired_scalp = position.strategy == "scalp" and position.max_hold_seconds is not None and now - position.opened_at >= position.max_hold_seconds
         if expired_scalp:
             if not _cancel_protection(client, state, state_path, position):
