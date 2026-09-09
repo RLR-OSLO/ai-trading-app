@@ -1,0 +1,1 @@
+Trigger exit-policy optimization after corrected trailing-stop test expectations.
