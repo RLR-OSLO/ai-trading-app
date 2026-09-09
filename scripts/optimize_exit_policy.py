@@ -17,7 +17,7 @@ t = replace_once(
     "portfolio constants",
 )
 
-# Remove the unconditional 15-minute scalp liquidation. A scalp that is merely noisy
+# Remove the unconditional scalp liquidation. A scalp that is merely noisy
 # should remain protected by its hard stop instead of being dumped at an arbitrary loss.
 t = replace_once(
     t,
@@ -71,6 +71,9 @@ t = t.replace('self.assertEqual(position.max_hold_seconds, 900)', 'self.assertEq
 t = t.replace('self.assertEqual(limits.max_open_positions, 8)', 'self.assertEqual(limits.max_open_positions, 4)')
 t = t.replace('self.assertEqual(limits.cooldown_seconds, 15)', 'self.assertEqual(limits.cooldown_seconds, 90)')
 t = t.replace('self.assertEqual(limits.max_trades_per_day, 100)', 'self.assertEqual(limits.max_trades_per_day, 36)')
+# The tighter trailing lock uses 45% of the original 1% risk gap at a 110 peak:
+# 110 * (1 - 0.0045) = 109.5050. Update both existing trailing assertions.
+t = t.replace('self.assertEqual(Decimal(position.trailing_stop_price), Decimal("108.90"))', 'self.assertEqual(Decimal(position.trailing_stop_price), Decimal("109.5050"))')
 
 old_timeout = '''    def test_expired_scalp_cancels_oco_before_market_exit(self):\n        client = FakeClient()\n        with tempfile.TemporaryDirectory() as directory:\n            path = Path(directory) / "state.json"\n            run_portfolio_cycle(\n                client,\n                {"BTCUSDC": True},\n                path,\n                self.limits(),\n                entry_strategies={"BTCUSDC": "scalp"},\n            )\n            state = load_state(path)\n            state.positions[0].opened_at = 1\n            state.cooldown_until = 0\n            save_state(path, state)\n            result = run_portfolio_cycle(client, {"BTCUSDC": False}, path, self.limits())\n        self.assertIn("reason=timeout", result)\n        self.assertEqual(client.cancelled_oco, 1)\n        self.assertEqual(client.live_sells, 1)\n'''
 new_timeout = '''    def test_expired_scalp_only_time_exits_when_profitable(self):\n        client = FakeClient()\n        with tempfile.TemporaryDirectory() as directory:\n            path = Path(directory) / "state.json"\n            run_portfolio_cycle(\n                client,\n                {"BTCUSDC": True},\n                path,\n                self.limits(),\n                entry_strategies={"BTCUSDC": "scalp"},\n            )\n            state = load_state(path)\n            state.positions[0].opened_at = int(__import__("time").time()) - 1900\n            state.cooldown_until = 0\n            save_state(path, state)\n            client.price = Decimal("100.30")\n            result = run_portfolio_cycle(client, {"BTCUSDC": False}, path, self.limits())\n        self.assertIn("reason=timeout_profit", result)\n        self.assertEqual(client.cancelled_oco, 1)\n        self.assertEqual(client.live_sells, 1)\n'''
