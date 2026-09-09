@@ -1,0 +1,30 @@
+name: Optimize exit policy
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  optimize:
+    if: github.event.head_commit.message == 'Run exit policy optimization'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply optimization
+        run: python scripts/optimize_exit_policy.py
+      - name: Run focused tests
+        run: python -m unittest tests.test_scalping tests.test_portfolio_live
+      - name: Commit optimization
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add trader/portfolio_live.py trader/scalping.py trader/worker.py tests/test_portfolio_live.py tests/test_scalping.py
+          git commit -m "Optimize entry filtering and profit protection" || exit 0
+          git push
