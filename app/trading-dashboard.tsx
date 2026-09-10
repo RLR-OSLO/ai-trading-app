@@ -693,7 +693,7 @@ export default function TradingDashboard() {
             : <button type="button" className="primary compact" onClick={() => void prioritizeSetup(setup)}>Prioriter og gjennomfør</button>;
         })()}
       </article>)}</div>}
-      <p className="muted best-setup-note">«Prioriter og gjennomfør» sender et kortvarig direktiv til boten – ikke en Binance-ordre fra nettleseren. Boten gjennomfører bare dersom samme signal fortsatt er gyldig og alle vanlige stop-loss-, dagstap-, kapital-, cooldown- og posisjonsgrenser fortsatt er oppfylt.</p>
+      <p className="muted best-setup-note">«Prioriter og gjennomfør» sender et prioritert direktiv til boten som blir stående til det gjennomføres eller stoppes – ikke en Binance-ordre fra nettleseren. Boten gjennomfører bare dersom samme signal fortsatt er gyldig og alle vanlige stop-loss-, dagstap-, kapital-, cooldown- og posisjonsgrenser fortsatt er oppfylt.</p>
     </section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">Spot, Margin-short og Futures vises tydelig hver for seg</span></div>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>

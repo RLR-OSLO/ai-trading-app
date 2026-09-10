@@ -100,11 +100,9 @@ class SupabaseReporter:
             raise RuntimeError(f"Supabase stale directive expiry failed ({exc.code}): {detail}") from exc
 
     def get_pending_directive(self) -> dict[str, Any] | None:
-        self.expire_stale_directives()
         query = urllib.parse.urlencode({
             "user_id": f"eq.{self.user_id}",
             "status": "eq.pending",
-            "expires_at": "gt.now()",
             "select": "id,symbol,direction,mode,requested_notional,leverage,created_at,expires_at",
             "order": "created_at.desc",
             "limit": "1",
