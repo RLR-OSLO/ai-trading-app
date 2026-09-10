@@ -59,7 +59,7 @@ class SupabaseReporter:
         query = urllib.parse.urlencode({
             "user_id": f"eq.{self.user_id}",
             "mode": "eq.live",
-            "select": "symbol,side,quantity,entry_price,created_at",
+            "select": "symbol,mode,side,quantity,entry_price,exit_price,pnl,leverage,created_at",
             "order": "created_at.asc",
             "limit": str(limit),
         })

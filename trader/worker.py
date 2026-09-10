@@ -15,6 +15,7 @@ from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
 from .config import DEFAULT_CONFIG
 from .news import NewsMonitor
 from .portfolio_live import PortfolioLimits, recover_positions_from_trade_history, run_portfolio_cycle, load_state, save_state
+from .learning import learning_factors, factor_for
 from .reporting import SupabaseReporter
 from .scalping import ScalpAnalysis, analyze_scalp
 
@@ -350,9 +351,11 @@ def main() -> None:
             authenticated = readiness_check(client)
             pairs = active_pairs(client, quote_asset)
             available_balance = free_quote_balance(client, quote_asset) if authenticated else Decimal("0")
+            recent_trades = reporter.get_recent_trades() if authenticated and reporter else []
+            learned = learning_factors(recent_trades)
             if authenticated and reporter:
                 recovered = recover_positions_from_trade_history(
-                    client, state_path, reporter.get_recent_trades(), quote_asset
+                    client, state_path, recent_trades, quote_asset
                 )
                 if recovered:
                     reporter.record_event("state_recovered", f"recovered={','.join(recovered)}", "warning")
@@ -427,7 +430,7 @@ def main() -> None:
                 reporter.record_event(
                     "heartbeat",
                     f"live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
-                    f"signals={signal_text};scores={score_text};scalp_scores={scalp_score_text};"
+                    f"signals={signal_text};scores={score_text};scalp_scores={scalp_score_text};short_scores={short_score_text};"
                     f"prices={price_text};balances={balances_text};wallet_values={wallet_value_text};account_total={account_total};spot_total={spot_total};spot_available={available_balance};futures_total={futures_total};futures_available={futures_available};invested_value={invested_value};markets={','.join(pairs)};"
                     f"best={best_pair}:{strategies[best_pair]}:{analyses[best_pair].score}/{scalp_analyses[best_pair].score};"
                     f"reasons={','.join(scalp_analyses[best_pair].reasons if strategies[best_pair] == 'scalp' else analyses[best_pair].reasons)}",
@@ -445,7 +448,9 @@ def main() -> None:
                 swing_conf = analyses[pair].confidence
                 scalp_conf = scalp_analyses[pair].confidence if strategy == "scalp" else Decimal("0")
                 confidence = max(swing_conf, scalp_conf)
-                size_multipliers[pair] = max(Decimal("0.30"), min(Decimal("1"), Decimal("0.20") + confidence * Decimal("0.80")))
+                base_size = max(Decimal("0.30"), min(Decimal("1"), Decimal("0.20") + confidence * Decimal("0.80")))
+                learned_factor = factor_for(learned, pair, "live")
+                size_multipliers[pair] = max(Decimal("0.20"), min(Decimal("1"), base_size * learned_factor))
                 if strategy == "bullrun":
                     stop, activation, size_multiplier = bullrun_profile(
                         analyses[pair], (settings or {}).get("stop_loss_percent", "1"), risk_profile
@@ -489,7 +494,11 @@ def main() -> None:
 
             if client.credentials is not None and settings is not None:
                 spot_state = load_state(state_path)
-                short_confidences = {pair: bearish_analyses[pair].confidence for pair in pairs}
+                derivative_mode = "futures" if bool(settings.get("futures_enabled")) and risk_profile == "extreme" else "margin"
+                short_confidences = {
+                    pair: max(Decimal("0"), min(Decimal("1"), bearish_analyses[pair].confidence * factor_for(learned, pair, derivative_mode)))
+                    for pair in pairs
+                }
                 short_result = run_short_cycle(
                     client.credentials,
                     short_signals,

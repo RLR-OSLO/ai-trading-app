@@ -189,20 +189,29 @@ export default function TradingDashboard() {
     const assetTrades = trades.filter((trade) => trade.symbol === symbol && trade.mode === "live");
     const derivativeTrades = trades.filter((trade) => trade.symbol === symbol && (trade.mode === "margin" || trade.mode === "futures")).sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
     let derivativeQuantity = 0;
+    let derivativeEntryValue = 0;
     let derivativeMode: "margin" | "futures" | null = null;
     let derivativeLeverage: number | null = null;
     for (const trade of derivativeTrades) {
       const qty = Math.max(0, Number(trade.quantity));
       if (trade.side === "SELL") {
         derivativeQuantity += qty;
+        derivativeEntryValue += qty * Number(trade.entry_price ?? 0);
         derivativeMode = trade.mode as "margin" | "futures";
         derivativeLeverage = trade.mode === "futures" ? Number(trade.leverage ?? 1) : 1;
       } else {
+        if (derivativeQuantity > 0) {
+          const closed = Math.min(derivativeQuantity, qty);
+          derivativeEntryValue = Math.max(0, derivativeEntryValue - (derivativeEntryValue / derivativeQuantity) * closed);
+        }
         derivativeQuantity = Math.max(0, derivativeQuantity - qty);
-        if (derivativeQuantity < 0.000000001) { derivativeQuantity = 0; derivativeMode = null; derivativeLeverage = null; }
+        if (derivativeQuantity < 0.000000001) { derivativeQuantity = 0; derivativeEntryValue = 0; derivativeMode = null; derivativeLeverage = null; }
       }
     }
     const derivativeOpen = derivativeQuantity > 0.000000001 && derivativeMode !== null;
+    const derivativeMarkPrice = marketPrices.get(symbol) ?? null;
+    const derivativeCurrentValue = derivativeOpen && derivativeMarkPrice !== null ? derivativeQuantity * derivativeMarkPrice : 0;
+    const derivativeUnrealized = derivativeOpen && derivativeMarkPrice !== null ? derivativeEntryValue - derivativeCurrentValue : null;
     const orderedTrades = [...assetTrades].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
     let quantity = 0;
     let invested = 0;
@@ -231,7 +240,7 @@ export default function TradingDashboard() {
     const currentPrice = authoritativeQuantity > 0 && currentValue !== null ? currentValue / authoritativeQuantity : fallbackPrice;
     const adjustedInvested = quantity > 0 && authoritativeQuantity > 0 ? invested * Math.min(1, authoritativeQuantity / quantity) : 0;
     const unrealized = currentValue === null ? null : currentValue - adjustedInvested;
-    return { asset, invested: adjustedInvested, quantity: authoritativeQuantity, pnl, currentPrice, currentValue, unrealized, owned, derivativeOpen, derivativeMode, derivativeQuantity, derivativeLeverage };
+    return { asset, invested: adjustedInvested, quantity: authoritativeQuantity, pnl, currentPrice, currentValue, unrealized, owned, derivativeOpen, derivativeMode, derivativeQuantity, derivativeLeverage, derivativeEntryValue, derivativeCurrentValue, derivativeUnrealized };
   }).sort((a, b) => Number(b.derivativeOpen) - Number(a.derivativeOpen) || Number(b.owned) - Number(a.owned) || Number(b.currentValue ?? 0) - Number(a.currentValue ?? 0) || MARKET_UNIVERSE.indexOf(a.asset as typeof MARKET_UNIVERSE[number]) - MARKET_UNIVERSE.indexOf(b.asset as typeof MARKET_UNIVERSE[number])),[assets, settings.quote_asset, trades, marketPrices, binanceBalances, binanceWalletValues]);
 
   const availableCapital = useMemo(() => {
@@ -701,11 +710,11 @@ export default function TradingDashboard() {
         <span style={{ padding: "6px 10px", borderRadius: 999, background: "rgba(168,85,247,.12)", border: "1px solid rgba(168,85,247,.35)", fontSize: 12 }}>MARGIN SHORT · lånt og solgt</span>
         <span style={{ padding: "6px 10px", borderRadius: 999, background: "rgba(245,158,11,.13)", border: "1px solid rgba(245,158,11,.38)", fontSize: 12 }}>FUTURES SHORT · kan ha gearing</span>
       </div>
-      <div className="assets">{allocations.map(({ asset, invested, quantity, pnl, currentPrice, currentValue, unrealized, owned, derivativeOpen, derivativeMode, derivativeQuantity, derivativeLeverage }) => {
+      <div className="assets">{allocations.map(({ asset, invested, quantity, pnl, currentPrice, currentValue, unrealized, owned, derivativeOpen, derivativeMode, derivativeQuantity, derivativeLeverage, derivativeEntryValue, derivativeCurrentValue, derivativeUnrealized }) => {
         const derivativeStyle = derivativeOpen ? (derivativeMode === "futures"
           ? { borderColor: "rgba(245,158,11,.65)", background: "rgba(245,158,11,.08)" }
           : { borderColor: "rgba(168,85,247,.60)", background: "rgba(168,85,247,.08)" }) : undefined;
-        return <div className={`asset${owned ? " invested" : ""}`} style={derivativeStyle} key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b>{owned && <span className="owned-badge">SPOT</span>}{derivativeOpen && <span className="owned-badge" style={{ marginLeft: 6 }}>{derivativeMode === "futures" ? `SHORT · FUTURES · ${derivativeLeverage ?? 1}x` : "SHORT · MARGIN"}</span>}<small>Spot investert: {money(invested)} {settings.quote_asset} · Eier: {crypto(quantity)} {asset}</small>{derivativeOpen && <small style={{ fontWeight: 700 }}>Åpen derivatposisjon: short {crypto(derivativeQuantity)} {asset}{derivativeMode === "futures" ? ` · gearing ${derivativeLeverage ?? 1}x` : " · margin/lån"}</small>}<small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`} · Spotverdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`}</small><Sparkline points={marketHistory[`${asset}${settings.quote_asset}`] ?? []} hours={historyHours} /></div><span className={(unrealized ?? pnl) < 0 ? "loss" : "gain"}>{unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>;
+        return <div className={`asset${owned ? " invested" : ""}`} style={derivativeStyle} key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b>{owned && <span className="owned-badge">SPOT</span>}{derivativeOpen && <span className="owned-badge" style={{ marginLeft: 6 }}>{derivativeMode === "futures" ? `SHORT · FUTURES · ${derivativeLeverage ?? 1}x` : "SHORT · MARGIN"}</span>}<small>Kjøpt for (Spot): {money(invested)} {settings.quote_asset} · Verdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`} · Eier: {crypto(quantity)} {asset}</small>{derivativeOpen && <small style={{ fontWeight: 700 }}>Short åpnet for: {money(derivativeEntryValue)} {settings.quote_asset} · Verdi nå: {money(derivativeCurrentValue)} {settings.quote_asset} · {derivativeMode === "futures" ? `Futures ${derivativeLeverage ?? 1}x` : "Margin/lån"} · Urealisert: {derivativeUnrealized === null ? "–" : `${derivativeUnrealized >= 0 ? "+" : ""}${money(derivativeUnrealized)} ${settings.quote_asset}`}</small>}<small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`}</small><Sparkline points={marketHistory[`${asset}${settings.quote_asset}`] ?? []} hours={historyHours} /></div><span className={(unrealized ?? pnl) < 0 ? "loss" : "gain"}>{unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>;
       })}</div>
       <p className="muted" style={{ marginTop: 12, marginBottom: 0 }}>Farget markering betyr at denne valutaen har en åpen short-/derivatposisjon i tillegg til eventuell spotbeholdning. Lilla = Margin-short. Oransje = Futures-short; badge viser gearingen som ble brukt ved åpning.</p>
     </section>
