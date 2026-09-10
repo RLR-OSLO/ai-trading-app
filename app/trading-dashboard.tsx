@@ -70,7 +70,7 @@ export default function TradingDashboard() {
     const [{ data: row, error }, { data: recent }, { data: events }] = await Promise.all([
       supabase.from("bot_settings").select("bot_enabled,live_trading_enabled,risk_profile,quote_asset,trade_cap_usdc,order_size_usdc,stop_loss_percent,take_profit_percent,max_daily_loss_usdc,short_enabled,futures_enabled,leverage,daily_loss_reset_at").eq("user_id", userData.user.id).maybeSingle(),
       supabase.from("trades").select("id,symbol,mode,side,quantity,entry_price,exit_price,pnl,leverage,created_at").order("created_at", { ascending: false }).limit(500),
-      supabase.from("bot_events").select("id,level,event_type,message,created_at").order("created_at", { ascending: false }).limit(1),
+      supabase.from("bot_events").select("id,level,event_type,message,created_at").eq("event_type", "heartbeat").order("created_at", { ascending: false }).limit(1),
     ]);
     if (error) setMessage(error.message);
     if (row) setSettings(row as Settings);
