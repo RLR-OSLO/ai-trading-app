@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from typing import Any
 
 from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
@@ -26,7 +26,7 @@ class DerivativesCapability:
 
 
 class BinanceMarginClient(BinanceSpotClient):
-    """Cross-margin client. No withdrawal or transfer methods are exposed."""
+    """Cross-margin client. No transfer or withdrawal methods are exposed."""
 
     def account_info(self) -> dict[str, Any]:
         return self._request("GET", "/sapi/v1/account/info", signed=True)
@@ -72,6 +72,43 @@ class BinanceMarginClient(BinanceSpotClient):
             params["newClientOrderId"] = client_order_id
         return self._request("POST", "/sapi/v1/margin/order", params, signed=True)
 
+    def protective_short_oco(
+        self,
+        *,
+        symbol: str,
+        quantity: Decimal,
+        take_profit_price: Decimal,
+        stop_price: Decimal,
+        live_trading_enabled: bool,
+        list_client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Protect a short: BUY lower for profit, BUY higher for stop, then auto-repay debt."""
+        if not live_trading_enabled:
+            raise BinanceError("Margin live-trading safety lock is disabled")
+        if quantity <= 0 or take_profit_price <= 0 or stop_price <= 0:
+            raise ValueError("Margin OCO values must be positive")
+        if take_profit_price >= stop_price:
+            raise ValueError("Short take-profit must be below stop price")
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "side": "BUY",
+            "quantity": format(quantity, "f"),
+            "price": format(take_profit_price, "f"),
+            "stopPrice": format(stop_price, "f"),
+            "newOrderRespType": "FULL",
+            "sideEffectType": "AUTO_REPAY",
+            "autoRepayAtCancel": "true",
+        }
+        if list_client_order_id:
+            params["listClientOrderId"] = list_client_order_id
+        return self._request("POST", "/sapi/v1/margin/order/oco", params, signed=True)
+
+    def query_order_list(self, *, order_list_id: int) -> dict[str, Any]:
+        return self._request("GET", "/sapi/v1/margin/orderList", {"orderListId": order_list_id}, signed=True)
+
+    def cancel_order_list(self, *, symbol: str, order_list_id: int) -> dict[str, Any]:
+        return self._request("DELETE", "/sapi/v1/margin/orderList", {"symbol": symbol, "orderListId": order_list_id}, signed=True)
+
 
 class BinanceFuturesClient(BinanceSpotClient):
     """USD-M futures client with explicit live lock and no transfer/withdrawal methods."""
@@ -97,6 +134,24 @@ class BinanceFuturesClient(BinanceSpotClient):
         row = self._request("GET", "/fapi/v1/ticker/price", {"symbol": symbol})
         return Decimal(str(row["price"]))
 
+    def quantity_for_notional(self, *, symbol: str, notional: Decimal) -> Decimal:
+        info = self.exchange_info_all()
+        row = next((x for x in info.get("symbols", []) if x.get("symbol") == symbol), None)
+        if row is None:
+            raise BinanceError(f"Futures symbol unavailable: {symbol}")
+        lot = next((x for x in row.get("filters", []) if x.get("filterType") == "MARKET_LOT_SIZE"), None)
+        if lot is None:
+            lot = next((x for x in row.get("filters", []) if x.get("filterType") == "LOT_SIZE"), None)
+        if lot is None:
+            raise BinanceError(f"Futures lot-size filter missing: {symbol}")
+        price = self.ticker_price(symbol)
+        step = Decimal(str(lot["stepSize"]))
+        minimum = Decimal(str(lot.get("minQty", "0")))
+        qty = (notional / price / step).to_integral_value(rounding=ROUND_DOWN) * step
+        if qty < minimum:
+            raise BinanceError(f"Futures quantity below minimum for {symbol}")
+        return qty
+
     def set_leverage(self, *, symbol: str, leverage: int, live_trading_enabled: bool) -> dict[str, Any]:
         if not live_trading_enabled:
             raise BinanceError("Futures live-trading safety lock is disabled")
@@ -110,7 +165,6 @@ class BinanceFuturesClient(BinanceSpotClient):
         try:
             return self._request("POST", "/fapi/v1/marginType", {"symbol": symbol, "marginType": "ISOLATED"}, signed=True)
         except BinanceError as exc:
-            # Binance returns -4046 when margin type is already set; that state is safe.
             if "-4046" in str(exc):
                 return None
             raise
@@ -142,6 +196,42 @@ class BinanceFuturesClient(BinanceSpotClient):
         if client_order_id:
             params["newClientOrderId"] = client_order_id
         return self._request("POST", "/fapi/v1/order", params, signed=True)
+
+    def close_algo(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str,
+        trigger_price: Decimal,
+        live_trading_enabled: bool,
+        client_algo_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Exchange-side close-all STOP_MARKET or TAKE_PROFIT_MARKET using the 2026 Algo service."""
+        if not live_trading_enabled:
+            raise BinanceError("Futures live-trading safety lock is disabled")
+        if side not in {"BUY", "SELL"}:
+            raise ValueError("Futures algo side must be BUY or SELL")
+        if order_type not in {"STOP_MARKET", "TAKE_PROFIT_MARKET"}:
+            raise ValueError("Unsupported futures close algo type")
+        params: dict[str, Any] = {
+            "algoType": "CONDITIONAL",
+            "symbol": symbol,
+            "side": side,
+            "type": order_type,
+            "triggerPrice": format(trigger_price, "f"),
+            "closePosition": "true",
+            "workingType": "MARK_PRICE",
+            "priceProtect": "true",
+        }
+        if client_algo_id:
+            params["clientAlgoId"] = client_algo_id
+        return self._request("POST", "/fapi/v1/algoOrder", params, signed=True)
+
+    def cancel_algo(self, *, algo_id: int, live_trading_enabled: bool) -> dict[str, Any]:
+        if not live_trading_enabled:
+            raise BinanceError("Futures live-trading safety lock is disabled")
+        return self._request("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id}, signed=True)
 
 
 def capability_snapshot(credentials: BinanceCredentials) -> DerivativesCapability:
