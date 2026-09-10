@@ -84,10 +84,12 @@ def _child_env(account: Account) -> dict[str, str]:
     env["AI_TRADING_MANAGED_CHILD"] = "1"
     if account.legacy:
         env["LIVE_STATE_PATH"] = os.getenv("LIVE_STATE_PATH", "/var/lib/ai-trading-app/live-state.json")
+        env["DERIVATIVES_STATE_PATH"] = os.getenv("DERIVATIVES_STATE_PATH", "/var/lib/ai-trading-app/derivatives-state.json")
     else:
         state_dir = Path("/var/lib/ai-trading-app/users") / account.user_id
         state_dir.mkdir(parents=True, exist_ok=True)
         env["LIVE_STATE_PATH"] = str(state_dir / "live-state.json")
+        env["DERIVATIVES_STATE_PATH"] = str(state_dir / "derivatives-state.json")
     return env
 
 
