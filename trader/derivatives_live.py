@@ -124,7 +124,7 @@ def _close_margin(
     state.trades_today += 1
     state.position = None
     save_state(path, state)
-    _record(report_trade, {"mode": "margin", "symbol": position.symbol, "side": "BUY", "quantity": str(executed), "entry_price": position.entry_price, "exit_price": str(spent / executed), "pnl": str(pnl)})
+    _record(report_trade, {"mode": "margin", "symbol": position.symbol, "side": "BUY", "quantity": str(executed), "entry_price": position.entry_price, "exit_price": str(spent / executed), "pnl": str(pnl), "leverage": 1})
     return f"margin_short_closed:{position.symbol}:pnl={pnl};reason={reason}"
 
 
@@ -179,7 +179,7 @@ def _open_margin(
         raise
     state.trades_today += 1
     save_state(path, state)
-    _record(report_trade, {"mode": "margin", "symbol": symbol, "side": "SELL", "quantity": str(executed), "entry_price": str(entry), "exit_price": None, "pnl": None})
+    _record(report_trade, {"mode": "margin", "symbol": symbol, "side": "SELL", "quantity": str(executed), "entry_price": str(entry), "exit_price": None, "pnl": None, "leverage": 1})
     return f"margin_short_opened:{symbol}:notional={received}:stop={stop}:target={take_profit}"
 
 
@@ -206,7 +206,7 @@ def _close_futures(
     state.trades_today += 1
     state.position = None
     save_state(path, state)
-    _record(report_trade, {"mode": "futures", "symbol": position.symbol, "side": "BUY", "quantity": str(qty), "entry_price": position.entry_price, "exit_price": str(exit_price), "pnl": str(pnl)})
+    _record(report_trade, {"mode": "futures", "symbol": position.symbol, "side": "BUY", "quantity": str(qty), "entry_price": position.entry_price, "exit_price": str(exit_price), "pnl": str(pnl), "leverage": position.leverage})
     return f"futures_short_closed:{position.symbol}:pnl={pnl};reason={reason}"
 
 
@@ -249,7 +249,7 @@ def _open_futures(
         raise
     state.trades_today += 1
     save_state(path, state)
-    _record(report_trade, {"mode": "futures", "symbol": symbol, "side": "SELL", "quantity": str(quantity), "entry_price": str(entry), "exit_price": None, "pnl": None})
+    _record(report_trade, {"mode": "futures", "symbol": symbol, "side": "SELL", "quantity": str(quantity), "entry_price": str(entry), "exit_price": None, "pnl": None, "leverage": leverage})
     return f"futures_short_opened:{symbol}:notional={entry * quantity}:leverage={leverage}:stop={stop_price}:target={target_price}"
 
 
