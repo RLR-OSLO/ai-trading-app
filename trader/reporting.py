@@ -75,7 +75,11 @@ class SupabaseReporter:
             raise RuntimeError(f"Supabase trades read failed ({exc.code}): {detail}") from exc
 
     def record_trade(self, payload: dict[str, Any]) -> None:
-        self._insert("trades", {**payload, "mode": "live"})
+        clean = dict(payload)
+        mode = str(clean.pop("mode", "live"))
+        if mode not in {"paper", "live", "margin", "futures"}:
+            raise ValueError(f"Unsupported trade mode: {mode}")
+        self._insert("trades", {**clean, "mode": mode})
 
     def record_event(self, event_type: str, message: str, level: str = "info") -> None:
         self._insert("bot_events", {"level": level, "event_type": event_type, "message": message})

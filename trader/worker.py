@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 
 from .analysis import MarketAnalysis, analyze_market, bullish_btc_regime
+from .directional import BearishAnalysis, analyze_bearish_market
+from .derivatives_live import run_short_cycle
 from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
 from .config import DEFAULT_CONFIG
 from .news import NewsMonitor
@@ -228,6 +230,7 @@ def market_scan(
     btc_regime = bullish_btc_regime(swing_frames[btc_pair])
     news = news_monitor.score()
     analyses = {pair: analyze_market(data) for pair, data in swing_frames.items()}
+    bearish_analyses = {pair: analyze_bearish_market(data) for pair, data in swing_frames.items()}
     aggressive_scalping = risk_profile in {"high", "extreme"}
     scalp_analyses = {
         pair: analyze_scalp(data, aggressive=aggressive_scalping)
@@ -256,6 +259,7 @@ def market_scan(
     )
 
     signals: dict[str, bool] = {}
+    short_signals: dict[str, bool] = {}
     strategies: dict[str, str] = {}
     for pair in ranked:
         swing_signal = (
@@ -267,14 +271,24 @@ def market_scan(
         bullrun_signal = bullruns[pair] and not hard_news_block
         signals[pair] = bullrun_signal or scalp_signal or swing_signal
         strategies[pair] = "bullrun" if bullrun_signal else ("scalp" if scalp_signal else "swing")
+        bearish = bearish_analyses[pair]
+        short_threshold = 7 if risk_profile == "high" else 6
+        short_signals[pair] = (
+            risk_profile in {"high", "extreme"}
+            and bearish.score >= short_threshold
+            and "short_risk_veto" not in bearish.reasons
+            and not hard_news_block
+            and not signals[pair]
+        )
 
     scalp_signal_text = ",".join(pair for pair in ranked if scalp_enabled and scalp_analyses[pair].signal) or "none"
     bullrun_text = ",".join(pair for pair in ranked if bullruns[pair]) or "none"
+    short_text = ",".join(pair for pair in ranked if short_signals[pair]) or "none"
     context = (
         f"threshold={effective_swing_threshold};base_threshold={swing_threshold};risk={risk_profile};btc_regime={btc_regime};"
-        f"news={news.score:.2f};news_penalty={news_penalty};headlines={news.fresh_headlines};scalp={scalp_signal_text};bullrun={bullrun_text}"
+        f"news={news.score:.2f};news_penalty={news_penalty};headlines={news.fresh_headlines};scalp={scalp_signal_text};bullrun={bullrun_text};shorts={short_text}"
     )
-    return signals, analyses, scalp_analyses, strategies, context
+    return signals, short_signals, analyses, bearish_analyses, scalp_analyses, strategies, context
 
 
 def main() -> None:
@@ -327,7 +341,7 @@ def main() -> None:
                 ",".join(pairs),
             )
 
-            signals, analyses, scalp_analyses, strategies, context = market_scan(
+            signals, short_signals, analyses, bearish_analyses, scalp_analyses, strategies, context = market_scan(
                 client,
                 news_monitor,
                 pairs,
@@ -338,12 +352,14 @@ def main() -> None:
             ) or "none"
             score_text = ",".join(f"{pair}:{analysis.score}" for pair, analysis in analyses.items())
             scalp_score_text = ",".join(f"{pair}:{analysis.score}" for pair, analysis in scalp_analyses.items())
+            short_score_text = ",".join(f"{pair}:{analysis.score}" for pair, analysis in bearish_analyses.items())
             LOG.info(
-                "market scan; buy_signals=%s; %s; swing_scores=%s; scalp_scores=%s",
+                "market scan; buy_signals=%s; %s; swing_scores=%s; scalp_scores=%s; short_scores=%s",
                 signal_text,
                 context,
                 score_text,
                 scalp_score_text,
+                short_score_text,
             )
 
             dashboard_live = (
@@ -374,22 +390,28 @@ def main() -> None:
                 last_heartbeat = time.time()
 
             runtime_settings = dict(settings or {})
-            runtime_settings["trade_cap_usdc"] = str(max(available_balance, Decimal("5")))
+            if settings is None:
+                runtime_settings["trade_cap_usdc"] = str(max(available_balance, Decimal("5")))
             stop_overrides: dict[str, Decimal] = {}
             activation_overrides: dict[str, Decimal] = {}
             size_multipliers: dict[str, Decimal] = {}
             max_hold_overrides: dict[str, int] = {}
             for pair, strategy in strategies.items():
+                swing_conf = analyses[pair].confidence
+                scalp_conf = scalp_analyses[pair].confidence if strategy == "scalp" else Decimal("0")
+                confidence = max(swing_conf, scalp_conf)
+                size_multipliers[pair] = max(Decimal("0.30"), min(Decimal("1"), Decimal("0.20") + confidence * Decimal("0.80")))
                 if strategy == "bullrun":
                     stop, activation, size_multiplier = bullrun_profile(
                         analyses[pair], (settings or {}).get("stop_loss_percent", "1"), risk_profile
                     )
                     stop_overrides[pair] = stop
                     activation_overrides[pair] = activation
-                    size_multipliers[pair] = size_multiplier
+                    size_multipliers[pair] = min(Decimal("1"), max(size_multipliers[pair], size_multiplier / Decimal("1.5")))
                     max_hold_overrides[pair] = BULLRUN_MAX_HOLD_SECONDS
                 elif strategy == "scalp":
-                    size_multipliers[pair] = Decimal("0.65") if risk_profile in {"high", "extreme"} else Decimal("0.75")
+                    scalp_ceiling = Decimal("0.75") if risk_profile in {"high", "extreme"} else Decimal("0.65")
+                    size_multipliers[pair] = min(size_multipliers[pair], scalp_ceiling)
 
             result = run_portfolio_cycle(
                 client,
@@ -409,6 +431,22 @@ def main() -> None:
                 LOG.info("new entries paused; no open position requires management")
             else:
                 LOG.warning("live cycle result=%s", result)
+
+            if client.credentials is not None and settings is not None:
+                spot_state = load_state(state_path)
+                short_confidences = {pair: bearish_analyses[pair].confidence for pair in pairs}
+                short_result = run_short_cycle(
+                    client.credentials,
+                    short_signals,
+                    short_confidences,
+                    settings,
+                    Path(os.getenv("DERIVATIVES_STATE_PATH", "/var/lib/ai-trading-app/derivatives-state.json")),
+                    reporter.record_trade if reporter else None,
+                    spot_realized_pnl=Decimal(spot_state.realized_pnl),
+                    allow_new_entries=allow_new_entries,
+                )
+                if short_result not in {"short_disabled", "no_short_signal", "short_new_entries_paused"}:
+                    LOG.warning("derivatives cycle result=%s", short_result)
         except Exception:
             LOG.exception("trading cycle failed; no new order will be submitted")
 

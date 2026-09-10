@@ -694,10 +694,14 @@ def run_portfolio_cycle(
         activation_fraction = (entry_target_fractions or {}).get(symbol, limits.target_fraction)
         max_hold = (entry_max_hold_seconds or {}).get(symbol)
 
-    multiplier = max(Decimal("0.5"), min(Decimal("1.5"), Decimal(str((entry_size_multipliers or {}).get(symbol, Decimal("1"))))))
-    # order_size is the user's maximum amount per investment. Risk presets provide
-    # a sensible default, but a manual override is honored up to the actual free balance.
-    spend = min(limits.order_size * multiplier, free_quote)
+    multiplier = max(Decimal("0.25"), min(Decimal("1"), Decimal(str((entry_size_multipliers or {}).get(symbol, Decimal("0.5"))))))
+    open_notional = sum((Decimal(p.quote_spent) for p in state.positions or []), Decimal("0"))
+    remaining_cap = max(Decimal("0"), limits.capital_cap - open_notional)
+    # order_size is a hard maximum per position. Signal quality chooses a smaller
+    # amount when conviction is weaker, but can use the full maximum on the best setups.
+    spend = min(limits.order_size * multiplier, free_quote, remaining_cap)
+    if remaining_cap < Decimal("5"):
+        return "capital_cap_reached"
     if spend < Decimal("5"):
         return f"insufficient_{quote.lower()}_for_sized_entry"
     client.test_market_buy(symbol=symbol, quote_quantity=spend)

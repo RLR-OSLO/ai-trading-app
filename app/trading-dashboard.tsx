@@ -134,7 +134,7 @@ export default function TradingDashboard() {
 
   const allocations = useMemo(() => assets.map((asset) => {
     const symbol = `${asset}${settings.quote_asset}`;
-    const assetTrades = trades.filter((trade) => trade.symbol === symbol);
+    const assetTrades = trades.filter((trade) => trade.symbol === symbol && trade.mode === "live");
     const orderedTrades = [...assetTrades].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
     let quantity = 0;
     let invested = 0;
@@ -208,8 +208,7 @@ export default function TradingDashboard() {
       short_enabled: profile === "high" || profile === "extreme" ? current.short_enabled : false,
       futures_enabled: profile === "extreme" ? current.futures_enabled : false,
       leverage: profile === "extreme" ? Math.max(1, Math.min(3, Number(current.leverage || 1))) : 1,
-      trade_cap_usdc: capital,
-      order_size_usdc: Math.min(capital, Math.max(5, roundedOrder)),
+      order_size_usdc: Math.min(Math.max(5, Number(current.trade_cap_usdc)), Math.max(5, roundedOrder)),
       stop_loss_percent: preset.stop_loss_percent,
       take_profit_percent: preset.take_profit_percent,
       max_daily_loss_usdc: Math.min(capital, Math.max(0.5, roundedDailyLoss)),
@@ -221,12 +220,12 @@ export default function TradingDashboard() {
     setSaving(true); setMessage("");
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) { setSaving(false); return; }
-    const effectiveCapital = Math.max(5, availableCapital);
+    const configuredCap = Math.max(5, Number(settings.trade_cap_usdc));
     const safe = {
       ...settings,
-      trade_cap_usdc: effectiveCapital,
-      order_size_usdc: Math.max(5, Number(settings.order_size_usdc)),
-      max_daily_loss_usdc: Math.min(effectiveCapital, Math.max(0.5, Number(settings.max_daily_loss_usdc))),
+      trade_cap_usdc: configuredCap,
+      order_size_usdc: Math.min(configuredCap, Math.max(5, Number(settings.order_size_usdc))),
+      max_daily_loss_usdc: Math.min(configuredCap, Math.max(0.5, Number(settings.max_daily_loss_usdc))),
       short_enabled: ["high", "extreme"].includes(settings.risk_profile) ? settings.short_enabled : false,
       futures_enabled: settings.risk_profile === "extreme" ? settings.futures_enabled : false,
       leverage: settings.risk_profile === "extreme" ? Math.max(1, Math.min(3, Number(settings.leverage))) : 1,
@@ -239,7 +238,7 @@ export default function TradingDashboard() {
 
   async function setLive(enabled: boolean) {
     setSaving(true); setMessage("");
-    const next = { ...settings, trade_cap_usdc: Math.max(5, availableCapital), bot_enabled: enabled, live_trading_enabled: enabled };
+    const next = { ...settings, bot_enabled: enabled, live_trading_enabled: enabled };
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) { setSaving(false); return; }
     const { error } = await supabase.from("bot_settings").upsert({ ...next, user_id: userData.user.id, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
@@ -387,7 +386,8 @@ export default function TradingDashboard() {
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">RISIKOKONTROLL</p><h3>Handelsinnstillinger</h3></div><span className={settings.live_trading_enabled ? "status-live" : "status-paused"}>{settings.live_trading_enabled ? "LIVE" : "PAUSET"}</span></div>
       <div className="form-grid">
         <label className="number-field"><span>Tilgjengelig kapital ({settings.quote_asset})</span><input type="number" value={availableCapital} readOnly /></label>
-        <Field label={`Maks per investering (${settings.quote_asset})`} value={settings.order_size_usdc} min={5} step={5} onChange={(value) => update("order_size_usdc", value)} />
+        <Field label={`Maks botkapital (${settings.quote_asset})`} value={settings.trade_cap_usdc} min={5} step={5} onChange={(value) => update("trade_cap_usdc", value)} />
+        <Field label={`Maks per posisjon (${settings.quote_asset})`} value={settings.order_size_usdc} min={5} max={Math.max(5, settings.trade_cap_usdc)} step={5} onChange={(value) => update("order_size_usdc", value)} />
         <Field label="Stop-loss (%)" value={settings.stop_loss_percent} min={0.25} max={10} step={0.25} onChange={(value) => update("stop_loss_percent", value)} />
         <Field label="Gevinstmål (%)" value={settings.take_profit_percent} min={0.5} max={25} step={0.5} onChange={(value) => update("take_profit_percent", value)} />
         <Field label={`Maks dagstap (${settings.quote_asset})`} value={settings.max_daily_loss_usdc} min={0.5} max={Math.max(0.5, availableCapital)} step={0.5} onChange={(value) => update("max_daily_loss_usdc", value)} />
@@ -430,7 +430,7 @@ export default function TradingDashboard() {
       </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button><button className="secondary" onClick={() => void resetDailyLoss()} disabled={saving || !loaded}>Reset dagstap</button></div>{message && <p className="inline-message">{message}</p>}
     </section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">Alle godkjente markeder · investerte posisjoner vises først</span></div><div className="assets">{allocations.map(({ asset, invested, quantity, pnl, currentPrice, currentValue, unrealized, owned }) => <div className={`asset${owned ? " invested" : ""}`} key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b>{owned && <span className="owned-badge">INVESTERT</span>}<small>Investert: {money(invested)} {settings.quote_asset} · Eier: {crypto(quantity)} {asset}</small><small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`} · Verdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`}</small></div><span className={(unrealized ?? pnl) < 0 ? "loss" : "gain"}>{unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>)}</div></section>
-    <section className="panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><span className="muted">Oppdateres hvert 30. sekund</span></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list">{trades.slice(0, 20).map((trade) => <div className="trade-row" key={trade.id}><b>{trade.side} {trade.symbol}</b><span>{Number(trade.quantity).toPrecision(6)}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{money(Number(trade.pnl ?? 0))} {settings.quote_asset}</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>)}</div>}</section>
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><span className="muted">Oppdateres hvert 30. sekund</span></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list">{trades.slice(0, 20).map((trade) => <div className="trade-row" key={trade.id}><b>{trade.mode.toUpperCase()} · {trade.side} {trade.symbol}</b><span>{Number(trade.quantity).toPrecision(6)}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{money(Number(trade.pnl ?? 0))} {settings.quote_asset}</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>)}</div>}</section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">SERVERSTATUS</p><h3>Siste kontrollsignal</h3></div><div className="server-signal-actions">{lastEvent && <time className="muted">{new Date(lastEvent.created_at).toLocaleString("nb-NO")}</time>}<button type="button" className="secondary compact" onClick={() => setServerSignalExpanded((value) => !value)}>{serverSignalExpanded ? "Skjul" : "Utvid"}</button></div></div><p className={`server-signal ${serverSignalExpanded ? "expanded" : "collapsed"} ${lastEvent?.level === "error" ? "loss" : "muted"}`}>{lastEvent?.message ?? "Serverrapportering er ikke koblet til ennå."}</p></section>
     <section className="panel chat-panel"><div className="panel-head"><div><p className="eyebrow">TRADINGASSISTENT</p><h3>Spør om det boten faktisk gjør</h3></div><span className="muted">Basert på ferske Binance- og botdata</span></div>
       <div className="chat-log" aria-live="polite">{chatMessages.map((item) => <div className={`chat-bubble ${item.role}`} key={item.id}><small>{item.role === "boss" ? "SJEFEN" : "BOTTEN"}</small><p>{item.text}</p></div>)}</div>
@@ -442,4 +442,15 @@ export default function TradingDashboard() {
   </main>;
 }
 
-function Field({ label, value, min, max, step, onChange }: Readonly<{ label: string; value: number; min: number; max?: number; step: number; onChange: (value: number) => void }>) { return <label className="number-field"><span>{label}</span><input type="number" value={value} min={min} max={max} step={step} onChange={(event) => onChange(Number(event.target.value))} /></label>; }
+function Field({ label, value, min, max, step, onChange }: Readonly<{ label: string; value: number; min: number; max?: number; step: number; onChange: (value: number) => void }>) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => { setDraft(String(value)); }, [value]);
+  const commit = () => {
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed)) { setDraft(String(value)); return; }
+    const bounded = Math.min(max ?? Number.POSITIVE_INFINITY, Math.max(min, parsed));
+    onChange(bounded);
+    setDraft(String(bounded));
+  };
+  return <label className="number-field"><span>{label}</span><input type="number" value={draft} min={min} max={max} step={step} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setDraft(event.target.value)} onBlur={commit} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></label>;
+}
