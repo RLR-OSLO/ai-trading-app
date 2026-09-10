@@ -1,36 +1,52 @@
 export default function HowItWorks() {
   const points = [
     {
-      title: "Scanner bare markeder vi faktisk kan komme oss ut av",
-      text: "Boten filtrerer bort tynne markeder og ser etter høy omsetning, mange handler og lav spread før et marked får være med i utvalget.",
+      title: "Scanner bare markeder med god nok likviditet",
+      text: "Boten filtrerer bort tynne markeder og prioriterer høy omsetning, mange handler og lav spread. Utvalget rangeres på nytt fortløpende.",
     },
     {
-      title: "Rangerer de sterkeste mulighetene fortløpende",
-      text: "Den sammenligner trend, momentum, volum og flere tidsrammer for å finne hvilke kryptovalutaer som har best oppsett akkurat nå.",
+      title: "Analyserer både oppgang og nedgang",
+      text: "Trend, momentum, volum, volatilitet og flere tidsrammer brukes både til vanlige kjøpssignaler og egne bearish-signaler for shorting.",
     },
     {
-      title: "Bruker ulike strategier etter markedssituasjonen",
-      text: "Vanlige trendhandler håndteres som swing, raske kortsiktige oppsett som scalp, og ekstra sterke bevegelser kan gå over i Bull Run-modus.",
+      title: "Velger strategi etter markedet",
+      text: "Spot brukes for long-posisjoner. Margin-short kan brukes på Høy og Ekstrem risiko. Futures kan brukes på Ekstrem risiko når det er aktivert av brukeren.",
+    },
+    {
+      title: "Tilpasser størrelsen dynamisk",
+      text: "Boten trenger ikke bruke samme beløp på hver handel. Signalstyrke og strategi bestemmer faktisk størrelse, men den kan aldri overskride brukerens maks per posisjon eller maks botkapital.",
     },
     {
       title: "Lar sterke vinnere løpe",
-      text: "Når en handel går riktig vei kan boten aktivere trailing i stedet for å selge på et fast gevinstmål. Dermed kan den følge en sterk trend videre opp og sikre gevinst når momentet snur.",
+      text: "Spot-handler kan bruke trailing i stedet for et statisk gevinstpunkt. Målet er å beskytte gevinst når markedet snur, uten å kutte sterke bevegelser for tidlig.",
     },
     {
-      title: "Tilpasser stop og størrelse innenfor sikkerhetsrammene",
-      text: "Stop-loss, trailing og posisjonsstørrelse kan tilpasses volatilitet og styrken i oppsettet, men boten må fortsatt holde seg innenfor definerte risiko- og tapsgrenser.",
+      title: "Shorting har egen beskyttelse",
+      text: "Margin-short åpnes ved å låne og selge, og lukkes ved å kjøpe tilbake og tilbakebetale. Futures-short åpnes separat og har egne stop-loss- og take-profit-ordrer.",
     },
     {
-      title: "Er bygget som daytrader – ikke som langsiktig investor",
-      text: "Målet er å finne gode bevegelser tidlig, ta kontrollerte posisjoner og komme ut igjen når oppsettet svekkes. Scalp-handler har korte tidsgrenser, og Bull Run-handler får mer spillerom når markedet er sterkt.",
+      title: "Futures bruker isolert margin og begrenset gearing",
+      text: "Når Futures er slått på brukes isolated margin. Gearing er begrenset til 1x–3x og styres av brukeren. Futures er kun tilgjengelig på Ekstrem risiko.",
     },
     {
-      title: "Binance er fasit for pengene",
-      text: "Saldo, reelle beholdninger og markedsverdi hentes fra Binance. Supabase brukes til historikk, innstillinger og rapportering – ikke som fasit for hva som faktisk eies.",
+      title: "Én felles tapsgrense beskytter hele boten",
+      text: "Realisert resultat fra spot og derivater inngår i samme daglige risikovurdering. Når tapsgrensen er nådd blokkeres nye posisjoner.",
     },
     {
-      title: "Har flere lag med risikokontroll",
-      text: "Boten bruker hard stop, trailing stop, maks dagstap, begrensning på antall handler, cooldown og maks antall samtidige posisjoner. Spot-only betyr også ingen giring, futures eller margin.",
+      title: "Binance er fasit for penger og posisjoner",
+      text: "Reelle saldi og markedsverdier hentes fra Binance. Supabase brukes til innstillinger, historikk, hendelser og kontrollinformasjon.",
+    },
+    {
+      title: "Hver bruker er teknisk isolert",
+      text: "Hver innlogget bruker har egne innstillinger, handler, hendelser, API-tilkobling og egne state-filer på serveren. Kontoer skal aldri dele tradingstate eller data.",
+    },
+    {
+      title: "Samme funksjoner for alle godkjente brukere",
+      text: "Alle kjører samme kodebase og samme funksjoner, men med egne Binance-nøkler, egne grenser og egne posisjoner. Dette gjør løsningen egnet for noen få separate brukere uten sammenblanding.",
+    },
+    {
+      title: "Sikkerhetslåser gjelder før avkastning",
+      text: "Uttak via API er deaktivert, IP-tilgangen er begrenset, nye handler kan pauses, og stop-/exit-logikk fortsetter å håndtere åpne posisjoner når nye entries er stoppet.",
     },
   ];
 
@@ -38,14 +54,14 @@ export default function HowItWorks() {
     <section className="panel" style={{ marginTop: 18 }}>
       <div className="panel-head">
         <div>
-          <p className="eyebrow">SLIK FUNGERER MODELLEN</p>
-          <h3>Hva tradingroboten gjør i praksis</h3>
+          <p className="eyebrow">SLIK FUNGERER BOTEN</p>
+          <h3>Fra markedsscan til handel og risikokontroll</h3>
         </div>
-        <span className="muted">Adaptiv daytrading · Spot only</span>
+        <span className="muted">Spot · Margin short · Futures · Dynamisk sizing</span>
       </div>
-      <p className="muted" style={{ maxWidth: 980, marginBottom: 18 }}>
-        Robotens jobb er ikke å gjette én perfekt pris. Den prøver i stedet å finne de mest likvide markedene,
-        oppdage hvor styrken er størst, velge riktig handelsmodus og styre risikoen mens posisjonen utvikler seg.
+      <p className="muted" style={{ maxWidth: 1020, marginBottom: 18 }}>
+        Boten forsøker ikke å forutsi én perfekt pris. Den scanner likvide markeder, vurderer retning og signalstyrke,
+        velger riktig handelsmodus og styrer størrelse, stop og exits innenfor grensene brukeren har satt.
       </p>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
         {points.map((point) => (
@@ -56,7 +72,7 @@ export default function HowItWorks() {
         ))}
       </div>
       <p className="muted" style={{ marginTop: 16, marginBottom: 0 }}>
-        Viktig: modellen er laget for å forbedre sannsynlighet og risikostyring – den kan ikke garantere gevinst i hver handel eller over enhver periode.
+        Viktig: modellen er laget for å forbedre beslutningskvalitet og risikostyring. Den kan ikke garantere gevinst, og Margin/Futures kan gi raskere tap enn vanlig spot dersom markedet går feil vei.
       </p>
     </section>
   );
