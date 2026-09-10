@@ -150,7 +150,9 @@ class BinanceFuturesClient(BinanceSpotClient):
         qty = (notional / price / step).to_integral_value(rounding=ROUND_DOWN) * step
         if qty < minimum:
             raise BinanceError(f"Futures quantity below minimum for {symbol}")
-        return qty
+        precision = int(row.get("quantityPrecision", max(0, -step.normalize().as_tuple().exponent)))
+        quantum = Decimal("1").scaleb(-precision)
+        return qty.quantize(quantum, rounding=ROUND_DOWN)
 
     def set_leverage(self, *, symbol: str, leverage: int, live_trading_enabled: bool) -> dict[str, Any]:
         if not live_trading_enabled:
