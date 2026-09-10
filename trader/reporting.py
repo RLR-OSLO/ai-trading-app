@@ -81,5 +81,44 @@ class SupabaseReporter:
             raise ValueError(f"Unsupported trade mode: {mode}")
         self._insert("trades", {**clean, "mode": mode})
 
+    def get_pending_directive(self) -> dict[str, Any] | None:
+        query = urllib.parse.urlencode({
+            "user_id": f"eq.{self.user_id}",
+            "status": "eq.pending",
+            "expires_at": "gt.now()",
+            "select": "id,symbol,direction,mode,requested_notional,leverage,created_at,expires_at",
+            "order": "created_at.desc",
+            "limit": "1",
+        })
+        request = urllib.request.Request(
+            f"{self.url}/rest/v1/trade_directives?{query}",
+            headers={"apikey": self.service_role_key, "Authorization": f"Bearer {self.service_role_key}"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                rows = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Supabase directive read failed ({exc.code}): {detail}") from exc
+        return rows[0] if rows else None
+
+    def finish_directive(self, directive_id: int, status: str, result: str) -> None:
+        if status not in {"executed", "rejected", "expired"}:
+            raise ValueError(f"Unsupported directive status: {status}")
+        body = json.dumps({"status": status, "result": result[:1000], "handled_at": "now()"}).encode("utf-8")
+        query = urllib.parse.urlencode({"id": f"eq.{directive_id}", "user_id": f"eq.{self.user_id}"})
+        # PostgREST cannot interpret now() inside JSON, so handled_at is omitted; status/result are authoritative.
+        body = json.dumps({"status": status, "result": result[:1000]}).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.url}/rest/v1/trade_directives?{query}", data=body, method="PATCH",
+            headers={"apikey": self.service_role_key, "Authorization": f"Bearer {self.service_role_key}", "Content-Type": "application/json", "Prefer": "return=minimal"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10):
+                return
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Supabase directive update failed ({exc.code}): {detail}") from exc
+
     def record_event(self, event_type: str, message: str, level: str = "info") -> None:
         self._insert("bot_events", {"level": level, "event_type": event_type, "message": message})

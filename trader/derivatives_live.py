@@ -263,6 +263,8 @@ def run_short_cycle(
     *,
     spot_realized_pnl: Decimal = Decimal("0"),
     allow_new_entries: bool = True,
+    preferred_symbol: str | None = None,
+    requested_notional: Decimal | None = None,
 ) -> str:
     state = load_state(state_path)
     max_daily_loss = Decimal(str(settings.get("max_daily_loss_usdc", "2")))
@@ -310,12 +312,16 @@ def run_short_cycle(
     candidates = [symbol for symbol, active in short_signals.items() if active]
     if not candidates:
         return "no_short_signal"
-    symbol = max(candidates, key=lambda item: confidences.get(item, Decimal("0")))
+    if preferred_symbol and preferred_symbol in candidates:
+        symbol = preferred_symbol
+    else:
+        symbol = max(candidates, key=lambda item: confidences.get(item, Decimal("0")))
     confidence = max(Decimal("0"), min(Decimal("1"), confidences.get(symbol, Decimal("0.5"))))
     multiplier = max(Decimal("0.30"), Decimal("0.20") + confidence * Decimal("0.80"))
     max_position = Decimal(str(settings.get("order_size_usdc", "25")))
     capital_cap = Decimal(str(settings.get("trade_cap_usdc", max_position)))
-    notional = min(max_position * multiplier, capital_cap)
+    automatic_notional = min(max_position * multiplier, capital_cap)
+    notional = min(max_position, capital_cap, requested_notional) if requested_notional is not None else automatic_notional
     if notional < Decimal("5"):
         return "short_notional_below_minimum"
 

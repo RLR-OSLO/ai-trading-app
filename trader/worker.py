@@ -367,6 +367,25 @@ def main() -> None:
                 if settings is not None else reporter is None
             )
             allow_new_entries = master_live and dashboard_live
+            directive = reporter.get_pending_directive() if reporter and settings is not None else None
+            directive_symbol = str((directive or {}).get("symbol") or "")
+            directive_direction = str((directive or {}).get("direction") or "")
+            directive_mode = str((directive or {}).get("mode") or "")
+            directive_notional = Decimal(str((directive or {}).get("requested_notional") or "0")) if directive else None
+            if directive:
+                valid_symbol = directive_symbol in pairs
+                valid_long = directive_direction == "LONG" and bool(signals.get(directive_symbol)) and directive_mode == "SPOT"
+                configured_short_mode = "FUTURES" if bool(settings.get("futures_enabled")) and risk_profile == "extreme" else "MARGIN"
+                valid_short = directive_direction == "SHORT" and bool(short_signals.get(directive_symbol)) and bool(settings.get("short_enabled")) and directive_mode == configured_short_mode
+                if not valid_symbol or not (valid_long or valid_short):
+                    reporter.finish_directive(int(directive["id"]), "rejected", "Signal/settings changed before execution")
+                    reporter.record_event("trade_directive_rejected", f"symbol={directive_symbol};direction={directive_direction};mode={directive_mode}", "warning")
+                    directive = None
+                    directive_symbol = ""
+                    directive_direction = ""
+                    directive_notional = None
+                else:
+                    reporter.record_event("trade_directive_active", f"symbol={directive_symbol};direction={directive_direction};mode={directive_mode};notional={directive_notional}")
 
             if reporter and time.time() - last_heartbeat >= 30:
                 best_pair = max(
@@ -413,6 +432,12 @@ def main() -> None:
                     scalp_ceiling = Decimal("0.75") if risk_profile in {"high", "extreme"} else Decimal("0.65")
                     size_multipliers[pair] = min(size_multipliers[pair], scalp_ceiling)
 
+            if directive and directive_direction == "LONG":
+                signals = {directive_symbol: True, **{k: v for k, v in signals.items() if k != directive_symbol}}
+                if settings and directive_notional is not None:
+                    order_max = max(Decimal("5"), Decimal(str(settings.get("order_size_usdc", "25"))))
+                    size_multipliers[directive_symbol] = max(Decimal("0.25"), min(Decimal("1"), directive_notional / order_max))
+
             result = run_portfolio_cycle(
                 client,
                 signals,
@@ -427,6 +452,10 @@ def main() -> None:
                 entry_size_multipliers=size_multipliers,
                 entry_max_hold_seconds=max_hold_overrides,
             )
+            if directive and directive_direction == "LONG" and result.startswith("bought:"):
+                reporter.finish_directive(int(directive["id"]), "executed", result)
+                reporter.record_event("trade_directive_executed", result)
+                directive = None
             if not allow_new_entries and result == "paused_new_entries":
                 LOG.info("new entries paused; no open position requires management")
             else:
@@ -444,7 +473,13 @@ def main() -> None:
                     reporter.record_trade if reporter else None,
                     spot_realized_pnl=Decimal(spot_state.realized_pnl),
                     allow_new_entries=allow_new_entries,
+                    preferred_symbol=directive_symbol if directive and directive_direction == "SHORT" else None,
+                    requested_notional=directive_notional if directive and directive_direction == "SHORT" else None,
                 )
+                if directive and directive_direction == "SHORT" and (short_result.startswith("margin_short_opened:") or short_result.startswith("futures_short_opened:")):
+                    reporter.finish_directive(int(directive["id"]), "executed", short_result)
+                    reporter.record_event("trade_directive_executed", short_result)
+                    directive = None
                 if short_result not in {"short_disabled", "no_short_signal", "short_new_entries_paused"}:
                     LOG.warning("derivatives cycle result=%s", short_result)
         except Exception:
