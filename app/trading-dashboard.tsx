@@ -8,20 +8,38 @@ import LogoutButton from "./logout-button";
 type Settings = {
   bot_enabled: boolean;
   live_trading_enabled: boolean;
-  risk_profile: "low" | "normal" | "high";
+  risk_profile: "low" | "normal" | "high" | "extreme";
   quote_asset: "USDC" | "USDT";
   trade_cap_usdc: number;
   order_size_usdc: number;
   stop_loss_percent: number;
   take_profit_percent: number;
   max_daily_loss_usdc: number;
+  short_enabled: boolean;
+  futures_enabled: boolean;
+  leverage: number;
+  daily_loss_reset_at: string | null;
 };
 
 type Trade = { id: string; symbol: string; mode: string; side: "BUY" | "SELL"; quantity: number; entry_price: number | null; exit_price: number | null; pnl: number | null; created_at: string };
 type BotEvent = { id: number; level: "info" | "warning" | "error"; event_type: string; message: string; created_at: string };
 type ChatMessage = { id: number; role: "boss" | "bot"; text: string };
 
-const defaults: Settings = { bot_enabled: false, live_trading_enabled: false, risk_profile: "normal", quote_asset: "USDC", trade_cap_usdc: 100, order_size_usdc: 25, stop_loss_percent: 1, take_profit_percent: 2, max_daily_loss_usdc: 2 };
+const defaults: Settings = {
+  bot_enabled: false,
+  live_trading_enabled: false,
+  risk_profile: "normal",
+  quote_asset: "USDC",
+  trade_cap_usdc: 100,
+  order_size_usdc: 25,
+  stop_loss_percent: 1,
+  take_profit_percent: 2,
+  max_daily_loss_usdc: 2,
+  short_enabled: false,
+  futures_enabled: false,
+  leverage: 1,
+  daily_loss_reset_at: null,
+};
 const MARKET_UNIVERSE = [
   "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LINK",
   "SUI", "XLM", "BCH", "LTC", "DOT", "SHIB", "TON", "HBAR", "UNI", "AAVE",
@@ -47,7 +65,7 @@ export default function TradingDashboard() {
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) return;
     const [{ data: row, error }, { data: recent }, { data: events }] = await Promise.all([
-      supabase.from("bot_settings").select("bot_enabled,live_trading_enabled,risk_profile,quote_asset,trade_cap_usdc,order_size_usdc,stop_loss_percent,take_profit_percent,max_daily_loss_usdc").eq("user_id", userData.user.id).maybeSingle(),
+      supabase.from("bot_settings").select("bot_enabled,live_trading_enabled,risk_profile,quote_asset,trade_cap_usdc,order_size_usdc,stop_loss_percent,take_profit_percent,max_daily_loss_usdc,short_enabled,futures_enabled,leverage,daily_loss_reset_at").eq("user_id", userData.user.id).maybeSingle(),
       supabase.from("trades").select("id,symbol,mode,side,quantity,entry_price,exit_price,pnl,created_at").order("created_at", { ascending: false }).limit(500),
       supabase.from("bot_events").select("id,level,event_type,message,created_at").order("created_at", { ascending: false }).limit(1),
     ]);
@@ -179,6 +197,7 @@ export default function TradingDashboard() {
       low: { orderShare: 0.15, stop_loss_percent: 0.75, take_profit_percent: 1.5, dailyLossShare: 0.01 },
       normal: { orderShare: 0.25, stop_loss_percent: 1.0, take_profit_percent: 2.0, dailyLossShare: 0.02 },
       high: { orderShare: 0.35, stop_loss_percent: 1.5, take_profit_percent: 3.0, dailyLossShare: 0.03 },
+      extreme: { orderShare: 0.40, stop_loss_percent: 1.75, take_profit_percent: 3.5, dailyLossShare: 0.04 },
     } as const;
     const preset = presets[profile];
     const roundedOrder = Math.round((capital * preset.orderShare) * 2) / 2;
@@ -186,13 +205,16 @@ export default function TradingDashboard() {
     setSettings((current) => ({
       ...current,
       risk_profile: profile,
+      short_enabled: profile === "high" || profile === "extreme" ? current.short_enabled : false,
+      futures_enabled: profile === "extreme" ? current.futures_enabled : false,
+      leverage: profile === "extreme" ? Math.max(1, Math.min(3, Number(current.leverage || 1))) : 1,
       trade_cap_usdc: capital,
       order_size_usdc: Math.min(capital, Math.max(5, roundedOrder)),
       stop_loss_percent: preset.stop_loss_percent,
       take_profit_percent: preset.take_profit_percent,
       max_daily_loss_usdc: Math.min(capital, Math.max(0.5, roundedDailyLoss)),
     }));
-    setMessage(`${profile === "low" ? "Lav" : profile === "normal" ? "Normal" : "Høy"} risiko valgt. Standardverdiene er satt automatisk – trykk Lagre innstillinger for å aktivere dem.`);
+    setMessage(`${profile === "low" ? "Lav" : profile === "normal" ? "Normal" : profile === "high" ? "Høy" : "Ekstrem"} risiko valgt. Standardverdiene er satt automatisk – trykk Lagre innstillinger for å aktivere dem.`);
   }
 
   async function save() {
@@ -200,7 +222,17 @@ export default function TradingDashboard() {
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) { setSaving(false); return; }
     const effectiveCapital = Math.max(5, availableCapital);
-    const safe = { ...settings, trade_cap_usdc: effectiveCapital, order_size_usdc: Math.max(5, Number(settings.order_size_usdc)), max_daily_loss_usdc: Math.min(effectiveCapital, Math.max(0.5, Number(settings.max_daily_loss_usdc))), updated_at: new Date().toISOString(), user_id: userData.user.id };
+    const safe = {
+      ...settings,
+      trade_cap_usdc: effectiveCapital,
+      order_size_usdc: Math.max(5, Number(settings.order_size_usdc)),
+      max_daily_loss_usdc: Math.min(effectiveCapital, Math.max(0.5, Number(settings.max_daily_loss_usdc))),
+      short_enabled: ["high", "extreme"].includes(settings.risk_profile) ? settings.short_enabled : false,
+      futures_enabled: settings.risk_profile === "extreme" ? settings.futures_enabled : false,
+      leverage: settings.risk_profile === "extreme" ? Math.max(1, Math.min(3, Number(settings.leverage))) : 1,
+      updated_at: new Date().toISOString(),
+      user_id: userData.user.id
+    };
     const { error } = await supabase.from("bot_settings").upsert(safe, { onConflict: "user_id" });
     setSaving(false); setMessage(error ? error.message : "Innstillingene er lagret."); if (!error) setSettings(safe);
   }
@@ -213,6 +245,20 @@ export default function TradingDashboard() {
     const { error } = await supabase.from("bot_settings").upsert({ ...next, user_id: userData.user.id, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
     if (!error) setSettings(next);
     setMessage(error ? error.message : enabled ? "Live trading er aktivert." : "Trading er pauset.");
+    setSaving(false);
+  }
+
+  async function resetDailyLoss() {
+    if (!window.confirm("Nullstille dagens registrerte tapsgrense og handelsantall?")) return;
+    setSaving(true); setMessage("");
+    const { data: userData } = await supabase.auth.getUser();
+    if (!userData.user) { setSaving(false); return; }
+    const stamp = new Date().toISOString();
+    const { error } = await supabase.from("bot_settings")
+      .update({ daily_loss_reset_at: stamp, updated_at: stamp })
+      .eq("user_id", userData.user.id);
+    if (!error) setSettings((current) => ({ ...current, daily_loss_reset_at: stamp }));
+    setMessage(error ? error.message : "Reset av dagstap er sendt til tradingmotoren.");
     setSaving(false);
   }
 
@@ -322,7 +368,7 @@ export default function TradingDashboard() {
 
   return <main className="shell">
     <header className="topbar"><div><span className="eyebrow">AI TRADING APP</span><h1>Kontrollpanel</h1></div><div style={{ display: "flex", gap: 10, alignItems: "center" }}><span className="pill"><i /> {serverOnline ? "Server online" : "Ingen fersk serverstatus"}</span><LogoutButton /></div></header>
-    <section className="hero"><div><p className="eyebrow">LIVE SPOT-TRADING</p><h2>Tilgjengelig saldo. Spot-only. Harde tapsgrenser.</h2><p className="muted">Binance-uttak, futures og giring er deaktivert.</p></div><div className="emergency-stop-box"><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button><small>Nødstopp blokkerer nye kjøp. Åpne posisjoner blir ikke dumpet umiddelbart; boten fortsetter å overvåke dem og kan selge ved stop-loss, trailing-stop eller annen aktiv exitregel. Start live igjen for å tillate nye kjøp.</small></div></section>
+    <section className="hero"><div><p className="eyebrow">AI TRADING</p><h2>Spot, short-analyse og utvidet risikokontroll.</h2><p className="muted">Binance-uttak er deaktivert. Margin/Futures krever egne Binance-rettigheter.</p></div><div className="emergency-stop-box"><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button><small>Nødstopp blokkerer nye kjøp. Åpne posisjoner blir ikke dumpet umiddelbart; boten fortsetter å overvåke dem og kan selge ved stop-loss, trailing-stop eller annen aktiv exitregel. Start live igjen for å tillate nye kjøp.</small></div></section>
     <section className="panel" style={{ marginBottom: 18 }}>
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 18, alignItems: "end" }}>
         <div><span className="label">TOTAL BINANCE-VERDI</span><strong style={{ display: "block", fontSize: "clamp(2.2rem, 5vw, 4.4rem)", lineHeight: 1.05, marginTop: 8 }}>{money(totalAssets)} {settings.quote_asset}</strong><small>Kun faktisk beholdning på Binance, verdsatt til markedspris</small></div>
@@ -345,8 +391,43 @@ export default function TradingDashboard() {
         <Field label="Stop-loss (%)" value={settings.stop_loss_percent} min={0.25} max={10} step={0.25} onChange={(value) => update("stop_loss_percent", value)} />
         <Field label="Gevinstmål (%)" value={settings.take_profit_percent} min={0.5} max={25} step={0.5} onChange={(value) => update("take_profit_percent", value)} />
         <Field label={`Maks dagstap (${settings.quote_asset})`} value={settings.max_daily_loss_usdc} min={0.5} max={Math.max(0.5, availableCapital)} step={0.5} onChange={(value) => update("max_daily_loss_usdc", value)} />
-        <label className="select-field"><span>Risikonivå</span><select value={settings.risk_profile} onChange={(event) => applyRiskProfile(event.target.value as Settings["risk_profile"])}><option value="low">Lav</option><option value="normal">Normal</option><option value="high">Høy</option></select><small>Bytte av risikonivå setter automatisk nye standardverdier. Du kan deretter overstyre «Maks per investering» manuelt. Boten bruker aldri mer enn faktisk ledig Binance-saldo.</small></label>
-      </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button></div>{message && <p className="inline-message">{message}</p>}
+        <label className="select-field"><span>Risikonivå</span><select value={settings.risk_profile} onChange={(event) => applyRiskProfile(event.target.value as Settings["risk_profile"])}><option value="low">Lav</option><option value="normal">Normal</option><option value="high">Høy</option><option value="extreme">Ekstrem</option></select><small>Bytte av risikonivå setter automatisk nye standardverdier. Du kan deretter overstyre «Maks per investering» manuelt.</small></label>
+
+        <label className="select-field">
+          <span>Shorting</span>
+          <select
+            value={settings.short_enabled ? "on" : "off"}
+            disabled={!["high", "extreme"].includes(settings.risk_profile)}
+            onChange={(e) => update("short_enabled", e.target.value === "on")}
+          >
+            <option value="off">AV</option>
+            <option value="on">PÅ</option>
+          </select>
+          <small>Tilgjengelig på Høy og Ekstrem. Krever Binance Margin-rettigheter.</small>
+        </label>
+
+        <label className="select-field">
+          <span>Futures</span>
+          <select
+            value={settings.futures_enabled ? "on" : "off"}
+            disabled={settings.risk_profile !== "extreme"}
+            onChange={(e) => update("futures_enabled", e.target.value === "on")}
+          >
+            <option value="off">AV</option>
+            <option value="on">PÅ</option>
+          </select>
+          <small>Kun Ekstrem risiko. Krever Binance Futures-rettighet.</small>
+        </label>
+
+        <Field
+          label="Gearing"
+          value={settings.leverage}
+          min={1}
+          max={3}
+          step={1}
+          onChange={(value) => update("leverage", Math.max(1, Math.min(3, value)))}
+        />
+      </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button><button className="secondary" onClick={() => void resetDailyLoss()} disabled={saving || !loaded}>Reset dagstap</button></div>{message && <p className="inline-message">{message}</p>}
     </section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">Alle godkjente markeder · investerte posisjoner vises først</span></div><div className="assets">{allocations.map(({ asset, invested, quantity, pnl, currentPrice, currentValue, unrealized, owned }) => <div className={`asset${owned ? " invested" : ""}`} key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b>{owned && <span className="owned-badge">INVESTERT</span>}<small>Investert: {money(invested)} {settings.quote_asset} · Eier: {crypto(quantity)} {asset}</small><small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`} · Verdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`}</small></div><span className={(unrealized ?? pnl) < 0 ? "loss" : "gain"}>{unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>)}</div></section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><span className="muted">Oppdateres hvert 30. sekund</span></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list">{trades.slice(0, 20).map((trade) => <div className="trade-row" key={trade.id}><b>{trade.side} {trade.symbol}</b><span>{Number(trade.quantity).toPrecision(6)}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{money(Number(trade.pnl ?? 0))} {settings.quote_asset}</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>)}</div>}</section>

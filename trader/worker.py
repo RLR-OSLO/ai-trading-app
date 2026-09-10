@@ -4,19 +4,20 @@ import logging
 import os
 import time
 from decimal import Decimal
+from datetime import datetime
 from pathlib import Path
 
 from .analysis import MarketAnalysis, analyze_market, bullish_btc_regime
 from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
 from .config import DEFAULT_CONFIG
 from .news import NewsMonitor
-from .portfolio_live import PortfolioLimits, recover_positions_from_trade_history, run_portfolio_cycle
+from .portfolio_live import PortfolioLimits, recover_positions_from_trade_history, run_portfolio_cycle, load_state, save_state
 from .reporting import SupabaseReporter
 from .scalping import ScalpAnalysis, analyze_scalp
 
 
 LOG = logging.getLogger("ai_trader")
-RISK_THRESHOLDS = {"low": 7, "normal": 6, "high": 4}
+RISK_THRESHOLDS = {"low": 7, "normal": 6, "high": 4, "extreme": 4}
 ACTIVE_MARKET_COUNT = 12
 MIN_24H_QUOTE_VOLUME = Decimal(os.getenv("MIN_24H_QUOTE_VOLUME", "5000000"))
 MIN_24H_TRADES = int(os.getenv("MIN_24H_TRADES", "5000"))
@@ -184,7 +185,7 @@ def binance_account_summary(client: BinanceSpotClient, quote_asset: str) -> tupl
 
 def bullrun_candidate(analysis: MarketAnalysis, scalp: ScalpAnalysis, risk_profile: str) -> bool:
     return (
-        risk_profile in {"normal", "high"}
+        risk_profile in {"normal", "high", "extreme"}
         and analysis.score >= 7
         and analysis.volume_ratio_15m >= Decimal("1.25")
         and Decimal("0.35") <= analysis.atr_percent_1h <= Decimal("6")
@@ -198,7 +199,7 @@ def bullrun_profile(analysis: MarketAnalysis, configured_stop_percent: object, r
     atr_fraction = analysis.atr_percent_1h / Decimal("100")
     stop = min(Decimal("0.03"), max(configured, atr_fraction * Decimal("1.5")))
     activation = min(Decimal("0.05"), max(Decimal("0.02"), stop * Decimal("1.25")))
-    size_multiplier = Decimal("1.50") if risk_profile == "high" else Decimal("1.25")
+    size_multiplier = Decimal("1.50") if risk_profile in {"high", "extreme"} else Decimal("1.25")
     return stop, activation, size_multiplier
 
 
@@ -227,19 +228,19 @@ def market_scan(
     btc_regime = bullish_btc_regime(swing_frames[btc_pair])
     news = news_monitor.score()
     analyses = {pair: analyze_market(data) for pair, data in swing_frames.items()}
-    aggressive_scalping = risk_profile == "high"
+    aggressive_scalping = risk_profile in {"high", "extreme"}
     scalp_analyses = {
         pair: analyze_scalp(data, aggressive=aggressive_scalping)
         for pair, data in scalp_frames.items()
     }
 
     swing_threshold = RISK_THRESHOLDS.get(risk_profile, RISK_THRESHOLDS["normal"])
-    scalp_enabled = risk_profile in {"normal", "high"}
+    scalp_enabled = risk_profile in {"normal", "high", "extreme"}
     # Generic negative crypto headlines used to veto every new entry, which made the
     # daytrader unnecessarily idle even when individual markets had strong signals.
     # Low risk keeps the hard veto. Normal/high instead require one extra swing point.
     hard_news_block = news.blocks_new_positions and risk_profile == "low"
-    news_penalty = 1 if news.blocks_new_positions and risk_profile in {"normal", "high"} else 0
+    news_penalty = 1 if news.blocks_new_positions and risk_profile in {"normal", "high", "extreme"} else 0
     effective_swing_threshold = swing_threshold + news_penalty
 
     bullruns = {pair: bullrun_candidate(analyses[pair], scalp_analyses[pair], risk_profile) for pair in pairs}
@@ -293,6 +294,19 @@ def main() -> None:
         risk_profile = "normal"
         try:
             settings = reporter.get_settings() if reporter else None
+            if settings and settings.get("daily_loss_reset_at"):
+                try:
+                    reset_ts = int(datetime.fromisoformat(str(settings["daily_loss_reset_at"]).replace("Z", "+00:00")).timestamp())
+                    state_mtime = int(state_path.stat().st_mtime) if state_path.exists() else 0
+                    if reset_ts > state_mtime:
+                        state = load_state(state_path)
+                        state.realized_pnl = "0"
+                        state.trades_today = 0
+                        state.cooldown_until = 0
+                        save_state(state_path, state)
+                        reporter.record_event("daily_loss_reset", "Daily loss state reset from dashboard", "warning")
+                except Exception:
+                    LOG.exception("daily loss reset request failed")
             quote_asset = str((settings or {}).get("quote_asset") or os.getenv("TRADING_QUOTE_ASSET", "USDC")).upper()
             risk_profile = str((settings or {}).get("risk_profile") or "normal").lower()
             authenticated = readiness_check(client)
@@ -375,7 +389,7 @@ def main() -> None:
                     size_multipliers[pair] = size_multiplier
                     max_hold_overrides[pair] = BULLRUN_MAX_HOLD_SECONDS
                 elif strategy == "scalp":
-                    size_multipliers[pair] = Decimal("0.65") if risk_profile == "high" else Decimal("0.75")
+                    size_multipliers[pair] = Decimal("0.65") if risk_profile in {"high", "extreme"} else Decimal("0.75")
 
             result = run_portfolio_cycle(
                 client,
@@ -398,7 +412,7 @@ def main() -> None:
         except Exception:
             LOG.exception("trading cycle failed; no new order will be submitted")
 
-        default_interval = 15 if risk_profile == "high" else 30
+        default_interval = 15 if risk_profile in {"high", "extreme"} else 30
         time.sleep(int(os.getenv("WORKER_INTERVAL_SECONDS", str(default_interval))))
 
 
