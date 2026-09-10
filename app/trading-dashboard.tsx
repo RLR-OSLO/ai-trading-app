@@ -24,6 +24,7 @@ type Settings = {
 type Trade = { id: string; symbol: string; mode: string; side: "BUY" | "SELL"; quantity: number; entry_price: number | null; exit_price: number | null; pnl: number | null; leverage?: number | null; created_at: string };
 type BotEvent = { id: number; level: "info" | "warning" | "error"; event_type: string; message: string; created_at: string };
 type ChatMessage = { id: number; role: "boss" | "bot"; text: string };
+type TradeDirective = { id: number; symbol: string; direction: "LONG" | "SHORT"; mode: "SPOT" | "MARGIN" | "FUTURES"; requested_notional: number; leverage: number; status: string; created_at: string; expires_at: string };
 
 const defaults: Settings = {
   bot_enabled: false,
@@ -57,6 +58,8 @@ export default function TradingDashboard() {
   const [lastEvent, setLastEvent] = useState<BotEvent | null>(null);
   const [chatInput, setChatInput] = useState("");
   const [serverSignalExpanded, setServerSignalExpanded] = useState(false);
+  const [priorityDirectives, setPriorityDirectives] = useState<TradeDirective[]>([]);
+  const [priorityBusy, setPriorityBusy] = useState<number | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     { id: 1, role: "bot", text: "Jeg leser ferske data fra tradingmotoren. Spør for eksempel: «Hva er status?», «Hvorfor handler du ikke?», «Hva er siste handel?», «Hvordan går resultatet?» eller «Hvilket marked er sterkest nå?»." },
   ]);
@@ -77,6 +80,25 @@ export default function TradingDashboard() {
   }, []);
 
   useEffect(() => { void load(); const timer = window.setInterval(() => void load(), 30_000); return () => window.clearInterval(timer); }, [load]);
+
+  async function loadPriorityDirectives() {
+    const { data: userData } = await supabase.auth.getUser();
+    if (!userData.user) { setPriorityDirectives([]); return; }
+    const { data, error } = await supabase
+      .from("trade_directives")
+      .select("id,symbol,direction,mode,requested_notional,leverage,status,created_at,expires_at")
+      .eq("user_id", userData.user.id)
+      .eq("status", "pending")
+      .gt("expires_at", new Date().toISOString())
+      .order("created_at", { ascending: false });
+    if (!error) setPriorityDirectives((data ?? []) as TradeDirective[]);
+  }
+
+  useEffect(() => {
+    void loadPriorityDirectives();
+    const timer = window.setInterval(() => void loadPriorityDirectives(), 5_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const stats = useMemo(() => {
     const now = Date.now();
@@ -382,6 +404,25 @@ export default function TradingDashboard() {
     return `${base} er med i aktiv overvåking, men har ikke kjøpssignal nå. Swing-score er ${swing ?? "–"}${threshold ? ` mot krav ${threshold}` : ""}, og scalp-score er ${scalp ?? "–"}. ${isBullrun ? "Den er markert som bull run, men et annet risikofilter blokkerer entry." : "Bull-run-signal er ikke aktivt."}`;
   }
 
+  async function stopPriority(directive: TradeDirective) {
+    setPriorityBusy(directive.id);
+    const { data: userData } = await supabase.auth.getUser();
+    if (!userData.user) { setPriorityBusy(null); return; }
+    const { error } = await supabase
+      .from("trade_directives")
+      .update({ status: "cancelled", result: "Priority stopped by user" })
+      .eq("id", directive.id)
+      .eq("user_id", userData.user.id)
+      .eq("status", "pending");
+    if (error) {
+      setMessage(`Kunne ikke stoppe prioritet: ${error.message}`);
+    } else {
+      setPriorityDirectives((current) => current.filter((item) => item.id !== directive.id));
+      setMessage(`Prioritet stoppet for ${directive.direction} ${directive.symbol}.`);
+    }
+    setPriorityBusy(null);
+  }
+
   async function prioritizeSetup(setup: { symbol: string; direction: "LONG" | "SHORT" | "VENT"; mode: string; suggested: number }) {
     if (setup.direction === "VENT") return;
     const confirmed = window.confirm(`Be boten prioritere og gjennomføre ${setup.direction} ${setup.symbol} via ${setup.mode} for ca. ${money(setup.suggested)} ${settings.quote_asset}? Alle vanlige risikogrenser gjelder fortsatt.`);
@@ -389,15 +430,20 @@ export default function TradingDashboard() {
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) { setMessage("Du må være innlogget."); return; }
     const cleanMode = setup.mode.startsWith("FUTURES") ? "FUTURES" : setup.mode === "MARGIN" ? "MARGIN" : "SPOT";
-    const { error } = await supabase.from("trade_directives").insert({
+    const { data: created, error } = await supabase.from("trade_directives").insert({
       user_id: userData.user.id,
       symbol: setup.symbol,
       direction: setup.direction,
       mode: cleanMode,
       requested_notional: Math.max(5, setup.suggested),
       leverage: cleanMode === "FUTURES" ? Math.max(1, Math.min(3, settings.leverage)) : 1,
-    });
-    setMessage(error ? `Kunne ikke sende direktiv: ${error.message}` : `Direktiv sendt: prioriter ${setup.direction} ${setup.symbol}. Boten forsøker på neste syklus hvis signalet fortsatt er gyldig.`);
+    }).select("id,symbol,direction,mode,requested_notional,leverage,status,created_at,expires_at").single();
+    if (error) {
+      setMessage(`Kunne ikke sende direktiv: ${error.message}`);
+    } else {
+      if (created) setPriorityDirectives((current) => [created as TradeDirective, ...current.filter((item) => item.symbol !== setup.symbol)]);
+      setMessage(`PRIORITERT: ${setup.direction} ${setup.symbol}. Boten forsøker på neste syklus hvis signalet fortsatt er gyldig.`);
+    }
   }
 
   async function downloadTradesCsv() {
@@ -566,7 +612,12 @@ export default function TradingDashboard() {
         <small>Modus: <b>{setup.mode}</b></small>
         <small>Aktuell score: <b>{setup.rawScore}</b> · Long {setup.longScore} / Short {setup.shortScore}</small>
         <small>Foreslått størrelse: <b>{money(setup.suggested)} {settings.quote_asset}</b></small>
-        {setup.direction !== "VENT" && <button type="button" className="primary compact" onClick={() => void prioritizeSetup(setup)}>Prioriter og gjennomfør</button>}
+        {setup.direction !== "VENT" && (() => {
+          const active = priorityDirectives.find((item) => item.symbol === setup.symbol && item.direction === setup.direction);
+          return active
+            ? <div className="priority-active"><span className="priority-active-badge">PRIORITERT</span><button type="button" className="danger compact" disabled={priorityBusy === active.id} onClick={() => void stopPriority(active)}>{priorityBusy === active.id ? "Stopper …" : "Stopp prioritet"}</button></div>
+            : <button type="button" className="primary compact" onClick={() => void prioritizeSetup(setup)}>Prioriter og gjennomfør</button>;
+        })()}
       </article>)}</div>}
       <p className="muted best-setup-note">«Prioriter og gjennomfør» sender et kortvarig direktiv til boten – ikke en Binance-ordre fra nettleseren. Boten gjennomfører bare dersom samme signal fortsatt er gyldig og alle vanlige stop-loss-, dagstap-, kapital-, cooldown- og posisjonsgrenser fortsatt er oppfylt.</p>
     </section>
