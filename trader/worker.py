@@ -10,6 +10,7 @@ from pathlib import Path
 from .analysis import MarketAnalysis, analyze_market, bullish_btc_regime
 from .directional import BearishAnalysis, analyze_bearish_market
 from .derivatives_live import run_short_cycle
+from .derivatives import BinanceFuturesClient
 from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
 from .config import DEFAULT_CONFIG
 from .news import NewsMonitor
@@ -183,6 +184,20 @@ def binance_account_summary(client: BinanceSpotClient, quote_asset: str) -> tupl
     balance_text = ",".join(f"{asset}:{quantity}" for asset, quantity in balances.items()) or "none"
     wallet_value_text = ",".join(f"{asset}:{value}" for asset, value in wallet_values.items()) or "none"
     return balance_text, total, invested, wallet_value_text
+
+
+def futures_wallet_summary(credentials: BinanceCredentials | None) -> tuple[Decimal, Decimal]:
+    if credentials is None:
+        return Decimal("0"), Decimal("0")
+    try:
+        account = BinanceFuturesClient(credentials).account()
+        return (
+            Decimal(str(account.get("totalWalletBalance", "0") or "0")),
+            Decimal(str(account.get("availableBalance", "0") or "0")),
+        )
+    except Exception:
+        LOG.exception("could not read futures wallet summary")
+        return Decimal("0"), Decimal("0")
 
 
 def bullrun_candidate(analysis: MarketAnalysis, scalp: ScalpAnalysis, risk_profile: str) -> bool:
@@ -397,12 +412,14 @@ def main() -> None:
                     ),
                 )
                 price_text = ",".join(f"{pair}:{client.ticker_price(pair)}" for pair in pairs)
-                balances_text, account_total, invested_value, wallet_value_text = binance_account_summary(client, quote_asset)
+                balances_text, spot_total, invested_value, wallet_value_text = binance_account_summary(client, quote_asset)
+                futures_total, futures_available = futures_wallet_summary(client.credentials)
+                account_total = spot_total + futures_total
                 reporter.record_event(
                     "heartbeat",
                     f"live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
                     f"signals={signal_text};scores={score_text};scalp_scores={scalp_score_text};"
-                    f"prices={price_text};balances={balances_text};wallet_values={wallet_value_text};account_total={account_total};invested_value={invested_value};markets={','.join(pairs)};"
+                    f"prices={price_text};balances={balances_text};wallet_values={wallet_value_text};account_total={account_total};spot_total={spot_total};spot_available={available_balance};futures_total={futures_total};futures_available={futures_available};invested_value={invested_value};markets={','.join(pairs)};"
                     f"best={best_pair}:{strategies[best_pair]}:{analyses[best_pair].score}/{scalp_analyses[best_pair].score};"
                     f"reasons={','.join(scalp_analyses[best_pair].reasons if strategies[best_pair] == 'scalp' else analyses[best_pair].reasons)}",
                 )

@@ -90,6 +90,7 @@ export default function TradingDashboard() {
   const [priorityBusy, setPriorityBusy] = useState<number | null>(null);
   const [historyHours, setHistoryHours] = useState<3 | 6 | 12>(6);
   const [marketHistory, setMarketHistory] = useState<HistoryMap>({});
+  const [setupAmounts, setSetupAmounts] = useState<Record<string, string>>({});
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     { id: 1, role: "bot", text: "Jeg leser ferske data fra tradingmotoren. Spør for eksempel: «Hva er status?», «Hvorfor handler du ikke?», «Hva er siste handel?», «Hvordan går resultatet?» eller «Hvilket marked er sterkest nå?»." },
   ]);
@@ -119,7 +120,6 @@ export default function TradingDashboard() {
       .select("id,symbol,direction,mode,requested_notional,leverage,status,created_at,expires_at")
       .eq("user_id", userData.user.id)
       .eq("status", "pending")
-      .gt("expires_at", new Date().toISOString())
       .order("created_at", { ascending: false });
     if (!error) setPriorityDirectives((data ?? []) as TradeDirective[]);
   }
@@ -249,11 +249,21 @@ export default function TradingDashboard() {
     return allocations.reduce((sum, allocation) => sum + (allocation.owned ? Number(allocation.currentValue ?? 0) : 0), 0);
   }, [allocations, lastEvent]);
 
+  const heartbeatNumber = (name: string, fallback = 0) => {
+    const match = lastEvent?.message.match(new RegExp(`(?:^|;)${name}=([0-9.]+)`));
+    const value = match ? Number(match[1]) : Number.NaN;
+    return Number.isFinite(value) ? value : fallback;
+  };
+  const spotAvailable = heartbeatNumber("spot_available", availableCapital);
+  const spotTotal = heartbeatNumber("spot_total", availableCapital + portfolioValue);
+  const futuresAvailable = heartbeatNumber("futures_available", 0);
+  const futuresTotal = heartbeatNumber("futures_total", 0);
+
   const totalAssets = useMemo(() => {
     const match = lastEvent?.message.match(/(?:^|;)account_total=([0-9.]+)/);
     const value = match ? Number(match[1]) : Number.NaN;
-    return Number.isFinite(value) ? value : availableCapital + portfolioValue;
-  }, [availableCapital, lastEvent, portfolioValue]);
+    return Number.isFinite(value) ? value : spotTotal + futuresTotal;
+  }, [lastEvent, spotTotal, futuresTotal]);
 
   const serverOnline = lastEvent ? Date.now() - new Date(lastEvent.created_at).getTime() < 900_000 : false;
 
@@ -296,33 +306,40 @@ export default function TradingDashboard() {
       const ratio = rawScore / threshold;
       const grade = direction === "VENT" ? "C" : ratio >= 1.45 ? "A" : ratio >= 1.05 ? "B" : "C";
       const sizeFactor = grade === "A" ? 1 : grade === "B" ? 0.7 : 0.4;
-      const suggested = Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc), availableCapital) * sizeFactor;
       const mode = direction === "LONG" ? "SPOT" : direction === "SHORT" ? (settings.futures_enabled && settings.risk_profile === "extreme" ? `FUTURES ${settings.leverage}x` : settings.short_enabled ? "MARGIN" : "SHORT AV") : "INGEN HANDEL";
+      const walletAvailable = mode.startsWith("FUTURES") ? futuresAvailable : spotAvailable;
+      const suggested = Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc), walletAvailable) * sizeFactor;
       return { symbol, direction, mode, rawScore, longScore, shortScore, rank, grade, suggested };
     }).sort((a, b) => b.rank - a.rank || b.rawScore - a.rawScore).slice(0, 3);
-  }, [lastEvent, settings.order_size_usdc, settings.trade_cap_usdc, settings.futures_enabled, settings.short_enabled, settings.risk_profile, settings.leverage, availableCapital]);
+  }, [lastEvent, settings.order_size_usdc, settings.trade_cap_usdc, settings.futures_enabled, settings.short_enabled, settings.risk_profile, settings.leverage, availableCapital, spotAvailable, futuresAvailable]);
 
   useEffect(() => {
-    const symbols = Array.from(new Set([
-      ...assets.map((asset) => `${asset}${settings.quote_asset}`),
-      ...bestSetups.map((setup) => setup.symbol),
-    ])).slice(0, 30);
-    if (!symbols.length) return;
     let cancelled = false;
     const loadHistory = async () => {
-      try {
-        const response = await fetch(`/api/market-history?symbols=${encodeURIComponent(symbols.join(","))}`, { cache: "no-store" });
-        if (!response.ok) return;
-        const payload = await response.json() as { series?: HistoryMap };
-        if (!cancelled && payload.series) setMarketHistory(payload.series);
-      } catch {
-        // Mini-grafer er kun visning og skal aldri påvirke tradingmotoren.
+      const since = new Date(Date.now() - 12 * 3_600_000).toISOString();
+      const pages = await Promise.all([
+        supabase.from("bot_events").select("message,created_at").eq("event_type", "heartbeat").gte("created_at", since).order("created_at", { ascending: false }).range(0, 999),
+        supabase.from("bot_events").select("message,created_at").eq("event_type", "heartbeat").gte("created_at", since).order("created_at", { ascending: false }).range(1000, 1999),
+      ]);
+      const rows = pages.flatMap((page) => page.data ?? []);
+      const series: HistoryMap = {};
+      for (const row of rows.reverse()) {
+        const match = String(row.message ?? "").match(/(?:^|;)prices=([^;]+)/);
+        if (!match) continue;
+        const t = new Date(row.created_at).getTime();
+        for (const item of match[1].split(",")) {
+          const [symbol, raw] = item.split(":");
+          const c = Number(raw);
+          if (!symbol || !Number.isFinite(c)) continue;
+          (series[symbol] ??= []).push({ t, c });
+        }
       }
+      if (!cancelled) setMarketHistory(series);
     };
     void loadHistory();
     const timer = window.setInterval(() => void loadHistory(), 60_000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [assets, bestSetups, settings.quote_asset]);
+  }, []);
 
   function update<K extends keyof Settings>(key: K, value: Settings[K]) { setSettings((current) => ({ ...current, [key]: value })); }
 
@@ -477,7 +494,11 @@ export default function TradingDashboard() {
 
   async function prioritizeSetup(setup: { symbol: string; direction: "LONG" | "SHORT" | "VENT"; mode: string; suggested: number }) {
     if (setup.direction === "VENT") return;
-    const confirmed = window.confirm(`Be boten prioritere og gjennomføre ${setup.direction} ${setup.symbol} via ${setup.mode} for ca. ${money(setup.suggested)} ${settings.quote_asset}? Alle vanlige risikogrenser gjelder fortsatt.`);
+    const requestedAmount = Number(setupAmounts[setup.symbol] ?? setup.suggested.toFixed(2));
+    if (!Number.isFinite(requestedAmount) || requestedAmount < 5) { setMessage("Beløpet må være minst 5 USDC."); return; }
+    const hardMax = Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc));
+    if (requestedAmount > hardMax) { setMessage(`Beløpet kan ikke være høyere enn ${money(hardMax)} ${settings.quote_asset}.`); return; }
+    const confirmed = window.confirm(`Be boten prioritere og gjennomføre ${setup.direction} ${setup.symbol} via ${setup.mode} for ${money(requestedAmount)} ${settings.quote_asset}? Alle vanlige risikogrenser gjelder fortsatt.`);
     if (!confirmed) return;
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) { setMessage("Du må være innlogget."); return; }
@@ -487,7 +508,7 @@ export default function TradingDashboard() {
       symbol: setup.symbol,
       direction: setup.direction,
       mode: cleanMode,
-      requested_notional: Math.max(5, setup.suggested),
+      requested_notional: requestedAmount,
       leverage: cleanMode === "FUTURES" ? Math.max(1, Math.min(3, settings.leverage)) : 1,
     }).select("id,symbol,direction,mode,requested_notional,leverage,status,created_at,expires_at").single();
     if (error) {
@@ -594,10 +615,10 @@ export default function TradingDashboard() {
     <header className="topbar"><div><span className="eyebrow">AI TRADING APP</span><h1>Kontrollpanel</h1></div><div style={{ display: "flex", gap: 10, alignItems: "center" }}><span className="pill"><i /> {serverOnline ? "Server online" : "Ingen fersk serverstatus"}</span><LogoutButton /></div></header>
     <section className="hero"><div><p className="eyebrow">AI TRADING</p><h2>Spot, short-analyse og utvidet risikokontroll.</h2><p className="muted">Binance-uttak er deaktivert. Margin/Futures krever egne Binance-rettigheter.</p></div><div className="emergency-stop-box"><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button><small>Nødstopp blokkerer nye kjøp. Åpne posisjoner blir ikke dumpet umiddelbart; boten fortsetter å overvåke dem og kan selge ved stop-loss, trailing-stop eller annen aktiv exitregel. Start live igjen for å tillate nye kjøp.</small></div></section>
     <section className="panel" style={{ marginBottom: 18 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 18, alignItems: "end" }}>
-        <div><span className="label">TOTAL BINANCE-VERDI</span><strong style={{ display: "block", fontSize: "clamp(2.2rem, 5vw, 4.4rem)", lineHeight: 1.05, marginTop: 8 }}>{money(totalAssets)} {settings.quote_asset}</strong><small>Kun faktisk beholdning på Binance, verdsatt til markedspris</small></div>
-        <div><span className="label">Investert på Binance</span><strong style={{ display: "block", fontSize: "1.6rem", marginTop: 8 }}>{money(portfolioValue)} {settings.quote_asset}</strong><small>Faktisk krypto-beholdning nå</small></div>
-        <div><span className="label">Ledig på Binance</span><strong style={{ display: "block", fontSize: "1.6rem", marginTop: 8 }}>{money(availableCapital)} {settings.quote_asset}</strong><small>Faktisk fri {settings.quote_asset}-saldo</small></div>
+      <div className="wallet-overview">
+        <div className="wallet-total"><span className="label">TOTAL BINANCE-VERDI</span><strong>{money(totalAssets)} {settings.quote_asset}</strong><small>Spot + Futures</small></div>
+        <div><span className="label">SPOT TOTALT</span><strong>{money(spotTotal)} {settings.quote_asset}</strong><small>Ledig Spot: {money(spotAvailable)} · Investert Spot: {money(portfolioValue)}</small></div>
+        <div><span className="label">FUTURES TOTALT</span><strong>{money(futuresTotal)} {settings.quote_asset}</strong><small>Ledig Futures: {money(futuresAvailable)} {settings.quote_asset}</small></div>
       </div>
     </section>
     <section className="grid metrics">
@@ -664,7 +685,7 @@ export default function TradingDashboard() {
         <small>Modus: <b>{setup.mode}</b></small>
         <small>Aktuell score: <b>{setup.rawScore}</b> · Long {setup.longScore} / Short {setup.shortScore}</small>
         <Sparkline points={marketHistory[setup.symbol] ?? []} hours={historyHours} />
-        <small>Foreslått størrelse: <b>{money(setup.suggested)} {settings.quote_asset}</b></small>
+        <div className="setup-amount"><small>Beløp ({settings.quote_asset}) · forslag {money(setup.suggested)}</small><input type="number" min={5} max={Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc))} step="1" value={setupAmounts[setup.symbol] ?? setup.suggested.toFixed(2)} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setSetupAmounts((current) => ({ ...current, [setup.symbol]: event.target.value }))} /></div>
         {setup.direction !== "VENT" && (() => {
           const active = priorityDirectives.find((item) => item.symbol === setup.symbol && item.direction === setup.direction);
           return active

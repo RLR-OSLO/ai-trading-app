@@ -165,7 +165,7 @@ class BinanceFuturesClient(BinanceSpotClient):
         try:
             return self._request("POST", "/fapi/v1/marginType", {"symbol": symbol, "marginType": "ISOLATED"}, signed=True)
         except BinanceError as exc:
-            if "-4046" in str(exc):
+            if "-4046" in str(exc) or "-4175" in str(exc):
                 return None
             raise
 
