@@ -205,6 +205,51 @@ export default function TradingDashboard() {
 
   const serverOnline = lastEvent ? Date.now() - new Date(lastEvent.created_at).getTime() < 900_000 : false;
 
+
+  const bestSetups = useMemo(() => {
+    const field = (name: string): string | null => {
+      const match = lastEvent?.message.match(new RegExp(`(?:^|;)${name}=([^;]+)`));
+      return match?.[1] ?? null;
+    };
+    const mapScores = (name: string) => {
+      const map = new Map<string, number>();
+      const raw = field(name);
+      if (!raw || raw === "none") return map;
+      for (const item of raw.split(",")) {
+        const [symbol, rawScore] = item.split(":");
+        const score = Number(rawScore);
+        if (symbol && Number.isFinite(score)) map.set(symbol, score);
+      }
+      return map;
+    };
+    const markets = (field("markets") ?? "").split(",").filter(Boolean);
+    const longRaw = field("signals") ?? "none";
+    const shortRaw = field("shorts") ?? "none";
+    const longSymbols = new Set(longRaw === "none" ? [] : longRaw.split(",").map((item) => item.split(":")[0]));
+    const shortSymbols = new Set(shortRaw === "none" ? [] : shortRaw.split(","));
+    const swing = mapScores("scores");
+    const scalp = mapScores("scalp_scores");
+    const short = mapScores("short_scores");
+    const threshold = Math.max(1, Number(field("threshold") ?? 4));
+
+    return markets.map((symbol) => {
+      const longScore = Math.max(swing.get(symbol) ?? 0, scalp.get(symbol) ?? 0);
+      const shortScore = short.get(symbol) ?? 0;
+      const hasLong = longSymbols.has(symbol);
+      const hasShort = shortSymbols.has(symbol);
+      const direction: "LONG" | "SHORT" | "VENT" = hasLong ? "LONG" : hasShort ? "SHORT" : "VENT";
+      const rawScore = direction === "SHORT" ? shortScore : longScore;
+      const signalBonus = direction === "VENT" ? 0 : 3;
+      const rank = rawScore + signalBonus + (direction === "LONG" && (longRaw.includes(`${symbol}:bullrun`) || longRaw.includes(`${symbol}:scalp`)) ? 1 : 0);
+      const ratio = rawScore / threshold;
+      const grade = direction === "VENT" ? "C" : ratio >= 1.45 ? "A" : ratio >= 1.05 ? "B" : "C";
+      const sizeFactor = grade === "A" ? 1 : grade === "B" ? 0.7 : 0.4;
+      const suggested = Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc), availableCapital) * sizeFactor;
+      const mode = direction === "LONG" ? "SPOT" : direction === "SHORT" ? (settings.futures_enabled && settings.risk_profile === "extreme" ? `FUTURES ${settings.leverage}x` : settings.short_enabled ? "MARGIN" : "SHORT AV") : "INGEN HANDEL";
+      return { symbol, direction, mode, rawScore, longScore, shortScore, rank, grade, suggested };
+    }).sort((a, b) => b.rank - a.rank || b.rawScore - a.rawScore).slice(0, 3);
+  }, [lastEvent, settings.order_size_usdc, settings.trade_cap_usdc, settings.futures_enabled, settings.short_enabled, settings.risk_profile, settings.leverage, availableCapital]);
+
   function update<K extends keyof Settings>(key: K, value: Settings[K]) { setSettings((current) => ({ ...current, [key]: value })); }
 
   function applyRiskProfile(profile: Settings["risk_profile"]) {
@@ -492,6 +537,19 @@ export default function TradingDashboard() {
           onChange={(value) => update("leverage", Math.max(1, Math.min(3, value)))}
         />
       </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button><button className="secondary" onClick={() => void resetDailyLoss()} disabled={saving || !loaded}>Reset dagstap</button></div>{message && <p className="inline-message">{message}</p>}
+    </section>
+    <section className="panel best-setup-panel">
+      <div className="panel-head"><div><p className="eyebrow">BESTE OPPSETT AKKURAT NÅ</p><h3>Botens høyest rangerte muligheter</h3></div><button type="button" className="secondary compact" onClick={() => void load()}>Oppdater nå</button></div>
+      <p className="muted best-setup-intro">Rangert fra siste faktiske markedsscan. A = sterkest oppsett, B = godt oppsett, C = svakere/vent. Beløpet er et forslag innenfor dine nåværende grenser – ingen ordre sendes fra denne boksen.</p>
+      {bestSetups.length === 0 ? <p className="empty">Venter på ferske markedsdata.</p> : <div className="best-setup-grid">{bestSetups.map((setup, index) => <article className={`best-setup-card ${setup.direction.toLowerCase()}`} key={setup.symbol}>
+        <div className="best-setup-rank">#{index + 1}</div>
+        <div><span className={`setup-grade grade-${setup.grade.toLowerCase()}`}>{setup.grade}</span><strong>{setup.symbol}</strong></div>
+        <div className={`setup-direction ${setup.direction.toLowerCase()}`}>{setup.direction}</div>
+        <small>Modus: <b>{setup.mode}</b></small>
+        <small>Aktuell score: <b>{setup.rawScore}</b> · Long {setup.longScore} / Short {setup.shortScore}</small>
+        <small>Foreslått størrelse: <b>{money(setup.suggested)} {settings.quote_asset}</b></small>
+      </article>)}</div>}
+      <p className="muted best-setup-note">Denne rangeringen er beslutningsstøtte. Boten bruker fortsatt stop-loss, maks dagstap, kapitaltak, cooldown og posisjonsgrenser før en faktisk handel kan gjennomføres.</p>
     </section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">Spot, Margin-short og Futures vises tydelig hver for seg</span></div>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
