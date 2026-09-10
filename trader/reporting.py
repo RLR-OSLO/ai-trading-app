@@ -81,7 +81,26 @@ class SupabaseReporter:
             raise ValueError(f"Unsupported trade mode: {mode}")
         self._insert("trades", {**clean, "mode": mode})
 
+    def expire_stale_directives(self) -> None:
+        query = urllib.parse.urlencode({
+            "user_id": f"eq.{self.user_id}",
+            "status": "eq.pending",
+            "expires_at": "lte.now()",
+        })
+        body = json.dumps({"status": "expired", "result": "Directive expired before execution"}).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.url}/rest/v1/trade_directives?{query}", data=body, method="PATCH",
+            headers={"apikey": self.service_role_key, "Authorization": f"Bearer {self.service_role_key}", "Content-Type": "application/json", "Prefer": "return=minimal"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10):
+                return
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Supabase stale directive expiry failed ({exc.code}): {detail}") from exc
+
     def get_pending_directive(self) -> dict[str, Any] | None:
+        self.expire_stale_directives()
         query = urllib.parse.urlencode({
             "user_id": f"eq.{self.user_id}",
             "status": "eq.pending",

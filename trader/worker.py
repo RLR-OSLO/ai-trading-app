@@ -482,8 +482,13 @@ def main() -> None:
                     directive = None
                 if short_result not in {"short_disabled", "no_short_signal", "short_new_entries_paused"}:
                     LOG.warning("derivatives cycle result=%s", short_result)
-        except Exception:
+        except Exception as exc:
             LOG.exception("trading cycle failed; no new order will be submitted")
+            if reporter:
+                try:
+                    reporter.record_event("trading_cycle_error", f"{type(exc).__name__}: {exc}", "error")
+                except Exception:
+                    LOG.exception("could not report trading cycle error")
 
         default_interval = 15 if risk_profile in {"high", "extreme"} else 30
         time.sleep(int(os.getenv("WORKER_INTERVAL_SECONDS", str(default_interval))))
