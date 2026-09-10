@@ -618,7 +618,7 @@ export default function TradingDashboard() {
       <div className="wallet-overview">
         <div className="wallet-total"><span className="label">TOTAL BINANCE-VERDI</span><strong>{money(totalAssets)} {settings.quote_asset}</strong><small>Spot + Futures</small></div>
         <div><span className="label">SPOT TOTALT</span><strong>{money(spotTotal)} {settings.quote_asset}</strong><small>Ledig Spot: {money(spotAvailable)} · Investert Spot: {money(portfolioValue)}</small></div>
-        <div><span className="label">FUTURES TOTALT</span><strong>{money(futuresTotal)} {settings.quote_asset}</strong><small>Ledig Futures: {money(futuresAvailable)} {settings.quote_asset}</small></div>
+        <div><span className="label">FUTURES TOTALT</span><strong>{money(futuresTotal)} {settings.quote_asset}</strong><small>Disponibelt: {money(futuresAvailable)} · Investert: {money(Math.max(0, futuresTotal - futuresAvailable))} {settings.quote_asset}</small></div>
       </div>
     </section>
     <section className="grid metrics">

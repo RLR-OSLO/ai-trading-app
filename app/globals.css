@@ -24,3 +24,7 @@
 
 /* v18 wallet overview and manual trade amount */
 .wallet-overview{display:grid;grid-template-columns:2fr 1fr 1fr;gap:18px;align-items:end}.wallet-overview strong{display:block;font-size:1.55rem;margin-top:8px}.wallet-overview .wallet-total strong{font-size:clamp(2.2rem,5vw,4.4rem);line-height:1.05}.setup-amount{display:grid;gap:5px;margin-top:4px}.setup-amount input{width:100%;background:rgba(5,15,25,.72);border:1px solid var(--line);border-radius:9px;color:var(--text);padding:8px 10px;font-weight:800}.setup-amount input:focus{outline:2px solid rgba(59,130,246,.35);border-color:rgba(59,130,246,.65)}@media(max-width:800px){.wallet-overview{grid-template-columns:1fr}.wallet-overview .wallet-total strong{font-size:2.6rem}}
+
+
+/* v20 white ultra-thin sparklines */
+.sparkline-wrap path{stroke:#fff!important;stroke-width:.55!important;opacity:.9}.sparkline-wrap.up,.sparkline-wrap.down{color:inherit}.sparkline-wrap.up span{color:#4ade80}.sparkline-wrap.down span{color:#fb7185}
