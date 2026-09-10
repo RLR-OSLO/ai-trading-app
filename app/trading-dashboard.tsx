@@ -49,6 +49,34 @@ const MARKET_UNIVERSE = [
 const money = (value: number) => new Intl.NumberFormat("nb-NO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
 const crypto = (value: number) => new Intl.NumberFormat("nb-NO", { maximumFractionDigits: 8 }).format(value);
 
+type HistoryPoint = { t: number; c: number };
+type HistoryMap = Record<string, HistoryPoint[]>;
+
+function Sparkline({ points, hours }: { points: HistoryPoint[]; hours: 3 | 6 | 12 }) {
+  const cutoff = Date.now() - hours * 3_600_000;
+  const visible = points.filter((point) => point.t >= cutoff);
+  if (visible.length < 2) return <div className="sparkline-empty">Ingen grafdata</div>;
+  const values = visible.map((point) => point.c);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = Math.max(max - min, Math.max(Math.abs(max), 1) * 0.000001);
+  const width = 150;
+  const height = 42;
+  const path = visible.map((point, index) => {
+    const x = (index / Math.max(1, visible.length - 1)) * width;
+    const y = height - ((point.c - min) / span) * height;
+    return `${index === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  const first = visible[0].c;
+  const last = visible[visible.length - 1].c;
+  const change = first ? ((last / first) - 1) * 100 : 0;
+  const trend = change >= 0 ? "up" : "down";
+  return <div className={`sparkline-wrap ${trend}`} title={`${change >= 0 ? "+" : ""}${change.toFixed(2)} % siste ${hours}t`}>
+    <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true"><path d={path} /></svg>
+    <span>{change >= 0 ? "+" : ""}{change.toFixed(2)} %</span>
+  </div>;
+}
+
 export default function TradingDashboard() {
   const [settings, setSettings] = useState<Settings>(defaults);
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -60,6 +88,8 @@ export default function TradingDashboard() {
   const [serverSignalExpanded, setServerSignalExpanded] = useState(false);
   const [priorityDirectives, setPriorityDirectives] = useState<TradeDirective[]>([]);
   const [priorityBusy, setPriorityBusy] = useState<number | null>(null);
+  const [historyHours, setHistoryHours] = useState<3 | 6 | 12>(6);
+  const [marketHistory, setMarketHistory] = useState<HistoryMap>({});
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     { id: 1, role: "bot", text: "Jeg leser ferske data fra tradingmotoren. Spør for eksempel: «Hva er status?», «Hvorfor handler du ikke?», «Hva er siste handel?», «Hvordan går resultatet?» eller «Hvilket marked er sterkest nå?»." },
   ]);
@@ -271,6 +301,28 @@ export default function TradingDashboard() {
       return { symbol, direction, mode, rawScore, longScore, shortScore, rank, grade, suggested };
     }).sort((a, b) => b.rank - a.rank || b.rawScore - a.rawScore).slice(0, 3);
   }, [lastEvent, settings.order_size_usdc, settings.trade_cap_usdc, settings.futures_enabled, settings.short_enabled, settings.risk_profile, settings.leverage, availableCapital]);
+
+  useEffect(() => {
+    const symbols = Array.from(new Set([
+      ...assets.map((asset) => `${asset}${settings.quote_asset}`),
+      ...bestSetups.map((setup) => setup.symbol),
+    ])).slice(0, 30);
+    if (!symbols.length) return;
+    let cancelled = false;
+    const loadHistory = async () => {
+      try {
+        const response = await fetch(`/api/market-history?symbols=${encodeURIComponent(symbols.join(","))}`, { cache: "no-store" });
+        if (!response.ok) return;
+        const payload = await response.json() as { series?: HistoryMap };
+        if (!cancelled && payload.series) setMarketHistory(payload.series);
+      } catch {
+        // Mini-grafer er kun visning og skal aldri påvirke tradingmotoren.
+      }
+    };
+    void loadHistory();
+    const timer = window.setInterval(() => void loadHistory(), 60_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [assets, bestSetups, settings.quote_asset]);
 
   function update<K extends keyof Settings>(key: K, value: Settings[K]) { setSettings((current) => ({ ...current, [key]: value })); }
 
@@ -603,7 +655,7 @@ export default function TradingDashboard() {
       </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button><button className="secondary" onClick={() => void resetDailyLoss()} disabled={saving || !loaded}>Reset dagstap</button></div>{message && <p className="inline-message">{message}</p>}
     </section>
     <section className="panel best-setup-panel">
-      <div className="panel-head"><div><p className="eyebrow">BESTE OPPSETT AKKURAT NÅ</p><h3>Botens høyest rangerte muligheter</h3></div><button type="button" className="secondary compact" onClick={() => void load()}>Oppdater nå</button></div>
+      <div className="panel-head"><div><p className="eyebrow">BESTE OPPSETT AKKURAT NÅ</p><h3>Botens høyest rangerte muligheter</h3></div><div className="chart-actions"><div className="chart-range" aria-label="Grafperiode">{([3,6,12] as const).map((hours) => <button type="button" key={hours} className={historyHours === hours ? "active" : ""} onClick={() => setHistoryHours(hours)}>{hours}t</button>)}</div><button type="button" className="secondary compact" onClick={() => void load()}>Oppdater nå</button></div></div>
       <p className="muted best-setup-intro">Rangert fra siste faktiske markedsscan. A = sterkest oppsett, B = godt oppsett, C = svakere/vent. Beløpet er et forslag innenfor dine nåværende grenser – ingen ordre sendes fra denne boksen.</p>
       {bestSetups.length === 0 ? <p className="empty">Venter på ferske markedsdata.</p> : <div className="best-setup-grid">{bestSetups.map((setup, index) => <article className={`best-setup-card ${setup.direction.toLowerCase()}`} key={setup.symbol}>
         <div className="best-setup-rank">#{index + 1}</div>
@@ -611,6 +663,7 @@ export default function TradingDashboard() {
         <div className={`setup-direction ${setup.direction.toLowerCase()}`}>{setup.direction}</div>
         <small>Modus: <b>{setup.mode}</b></small>
         <small>Aktuell score: <b>{setup.rawScore}</b> · Long {setup.longScore} / Short {setup.shortScore}</small>
+        <Sparkline points={marketHistory[setup.symbol] ?? []} hours={historyHours} />
         <small>Foreslått størrelse: <b>{money(setup.suggested)} {settings.quote_asset}</b></small>
         {setup.direction !== "VENT" && (() => {
           const active = priorityDirectives.find((item) => item.symbol === setup.symbol && item.direction === setup.direction);
@@ -631,7 +684,7 @@ export default function TradingDashboard() {
         const derivativeStyle = derivativeOpen ? (derivativeMode === "futures"
           ? { borderColor: "rgba(245,158,11,.65)", background: "rgba(245,158,11,.08)" }
           : { borderColor: "rgba(168,85,247,.60)", background: "rgba(168,85,247,.08)" }) : undefined;
-        return <div className={`asset${owned ? " invested" : ""}`} style={derivativeStyle} key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b>{owned && <span className="owned-badge">SPOT</span>}{derivativeOpen && <span className="owned-badge" style={{ marginLeft: 6 }}>{derivativeMode === "futures" ? `SHORT · FUTURES · ${derivativeLeverage ?? 1}x` : "SHORT · MARGIN"}</span>}<small>Spot investert: {money(invested)} {settings.quote_asset} · Eier: {crypto(quantity)} {asset}</small>{derivativeOpen && <small style={{ fontWeight: 700 }}>Åpen derivatposisjon: short {crypto(derivativeQuantity)} {asset}{derivativeMode === "futures" ? ` · gearing ${derivativeLeverage ?? 1}x` : " · margin/lån"}</small>}<small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`} · Spotverdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`}</small></div><span className={(unrealized ?? pnl) < 0 ? "loss" : "gain"}>{unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>;
+        return <div className={`asset${owned ? " invested" : ""}`} style={derivativeStyle} key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b>{owned && <span className="owned-badge">SPOT</span>}{derivativeOpen && <span className="owned-badge" style={{ marginLeft: 6 }}>{derivativeMode === "futures" ? `SHORT · FUTURES · ${derivativeLeverage ?? 1}x` : "SHORT · MARGIN"}</span>}<small>Spot investert: {money(invested)} {settings.quote_asset} · Eier: {crypto(quantity)} {asset}</small>{derivativeOpen && <small style={{ fontWeight: 700 }}>Åpen derivatposisjon: short {crypto(derivativeQuantity)} {asset}{derivativeMode === "futures" ? ` · gearing ${derivativeLeverage ?? 1}x` : " · margin/lån"}</small>}<small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`} · Spotverdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`}</small><Sparkline points={marketHistory[`${asset}${settings.quote_asset}`] ?? []} hours={historyHours} /></div><span className={(unrealized ?? pnl) < 0 ? "loss" : "gain"}>{unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>;
       })}</div>
       <p className="muted" style={{ marginTop: 12, marginBottom: 0 }}>Farget markering betyr at denne valutaen har en åpen short-/derivatposisjon i tillegg til eventuell spotbeholdning. Lilla = Margin-short. Oransje = Futures-short; badge viser gearingen som ble brukt ved åpning.</p>
     </section>
