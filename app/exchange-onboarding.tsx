@@ -28,18 +28,11 @@ export default function ExchangeOnboarding({ children }: Readonly<{ children: Re
   async function save() {
     setMessage("");
     setState("saving");
-    const validation = await fetch("/api/validate-binance", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apiKey: apiKey.trim(), apiSecret: apiSecret.trim() }),
-    });
-    const result = await validation.json();
-    if (!validation.ok || !result?.ok) {
-      setMessage(result?.error ?? "Binance-nøkkelen kunne ikke verifiseres.");
-      setState("required");
-      return;
-    }
 
+    // Do not validate from Vercel. Binance sees Vercel's egress location/IP,
+    // while user API keys are intentionally restricted to the trading server.
+    // Credentials are stored encrypted and then used/validated by the
+    // DigitalOcean trading worker from the whitelisted server IP.
     const { error } = await supabase.rpc("save_binance_credentials", {
       p_api_key: apiKey.trim(),
       p_api_secret: apiSecret.trim(),
@@ -66,14 +59,14 @@ export default function ExchangeOnboarding({ children }: Readonly<{ children: Re
     {(state === "required" || state === "saving") && <form onSubmit={(event) => { event.preventDefault(); void save(); }}>
       <label htmlFor="binance-api-key">Binance API Key</label>
       <input id="binance-api-key" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} required />
-      <details className="setup-help"><summary>ⓘ Hvor finner jeg API Key?</summary><p>Binance → profil/konto → API Management. Opprett en vanlig API-nøkkel. Aktiver lesetilgang og Spot trading. Ikke aktiver uttak, futures eller margin.</p></details>
+      <details className="setup-help"><summary>ⓘ Hvor finner jeg API Key?</summary><p>Binance → profil/konto → API Management. Opprett en vanlig API-nøkkel. Aktiver lesetilgang og Spot trading. Ikke aktiver uttak.</p></details>
 
       <label htmlFor="binance-api-secret">Binance Secret Key</label>
       <input id="binance-api-secret" type="password" autoComplete="new-password" value={apiSecret} onChange={(event) => setApiSecret(event.target.value)} required />
       <details className="setup-help"><summary>ⓘ Viktig om Secret Key</summary><p>Secret vises normalt bare når nøkkelen opprettes. Lim den inn her. Den lagres kryptert i Supabase Vault og vises ikke igjen i dashboardet.</p></details>
 
-      <div className="setup-note"><b>Anbefalt sikkerhet:</b> Begrens API-nøkkelen til server-IP <code>146.190.20.51</code>. Tillat kun Read + Spot Trading. Uttak skal være deaktivert.</div>
-      <button className="primary" type="submit" disabled={state === "saving" || !apiKey.trim() || !apiSecret.trim()}>{state === "saving" ? "Kontrollerer og lagrer …" : "Koble Binance og fortsett"}</button>
+      <div className="setup-note"><b>Anbefalt sikkerhet:</b> Begrens API-nøkkelen til server-IP <code>146.190.20.51</code>. Tillat Read + nødvendig trading. Uttak skal være deaktivert.</div>
+      <button className="primary" type="submit" disabled={state === "saving" || !apiKey.trim() || !apiSecret.trim()}>{state === "saving" ? "Lagrer sikkert …" : "Koble Binance og fortsett"}</button>
     </form>}
     {message && <p className="gate-error" role="alert">{message}</p>}
   </section></main>;
