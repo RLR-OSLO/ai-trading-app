@@ -366,9 +366,9 @@ export default function TradingDashboard() {
     setSettings((current) => ({
       ...current,
       risk_profile: profile,
-      short_enabled: profile === "high" || profile === "extreme" ? current.short_enabled : false,
+      short_enabled: profile === "high" || profile === "extreme",
       futures_enabled: profile === "extreme" ? current.futures_enabled : false,
-      leverage: profile === "extreme" ? Math.max(1, Math.min(3, Number(current.leverage || 1))) : 1,
+      leverage: profile === "extreme" ? Math.max(1, Math.min(2, Number(current.leverage || 1))) : 1,
       order_size_usdc: Math.min(Math.max(5, Number(current.trade_cap_usdc)), Math.max(5, roundedOrder)),
       stop_loss_percent: preset.stop_loss_percent,
       take_profit_percent: preset.take_profit_percent,
@@ -389,7 +389,7 @@ export default function TradingDashboard() {
       max_daily_loss_usdc: Math.min(configuredCap, Math.max(0.5, Number(settings.max_daily_loss_usdc))),
       short_enabled: ["high", "extreme"].includes(settings.risk_profile) ? settings.short_enabled : false,
       futures_enabled: settings.risk_profile === "extreme" ? settings.futures_enabled : false,
-      leverage: settings.risk_profile === "extreme" ? Math.max(1, Math.min(3, Number(settings.leverage))) : 1,
+      leverage: settings.risk_profile === "extreme" ? Math.max(1, Math.min(2, Number(settings.leverage))) : 1,
       updated_at: new Date().toISOString(),
       user_id: userData.user.id
     };
@@ -644,7 +644,7 @@ export default function TradingDashboard() {
         <Field label={`Maks botkapital (${settings.quote_asset})`} value={settings.trade_cap_usdc} min={5} step={5} onChange={(value) => update("trade_cap_usdc", value)} />
         <Field label={`Maks per posisjon (${settings.quote_asset})`} value={settings.order_size_usdc} min={5} max={Math.max(5, settings.trade_cap_usdc)} step={5} onChange={(value) => update("order_size_usdc", value)} />
         <Field label="Stop-loss (%)" value={settings.stop_loss_percent} min={0.25} max={10} step={0.25} onChange={(value) => update("stop_loss_percent", value)} />
-        <Field label="Gevinstmål (%)" value={settings.take_profit_percent} min={0.5} max={25} step={0.5} onChange={(value) => update("take_profit_percent", value)} />
+        <Field label="Gevinstmål / shortmål (%)" value={settings.take_profit_percent} min={0.5} max={25} step={0.5} onChange={(value) => update("take_profit_percent", value)} />
         <Field label={`Maks dagstap (${settings.quote_asset})`} value={settings.max_daily_loss_usdc} min={0.5} max={Math.max(0.5, availableCapital)} step={0.5} onChange={(value) => update("max_daily_loss_usdc", value)} />
         <label className="select-field"><span>Risikonivå</span><select value={settings.risk_profile} onChange={(event) => applyRiskProfile(event.target.value as Settings["risk_profile"])}><option value="low">Lav</option><option value="normal">Normal</option><option value="high">Høy</option><option value="extreme">Ekstrem</option></select><small>Bytte av risikonivå setter automatisk nye standardverdier. Du kan deretter overstyre «Maks per investering» manuelt.</small></label>
 
@@ -658,7 +658,7 @@ export default function TradingDashboard() {
             <option value="off">AV</option>
             <option value="on">PÅ</option>
           </select>
-          <small>Tilgjengelig på Høy og Ekstrem. Krever Binance Margin-rettigheter.</small>
+          <small>Én short om gangen. Krever bearish signal og Binance Margin/Futures-rettighet.</small>
         </label>
 
         <label className="select-field">
@@ -678,9 +678,9 @@ export default function TradingDashboard() {
           label="Gearing"
           value={settings.leverage}
           min={1}
-          max={3}
+          max={2}
           step={1}
-          onChange={(value) => update("leverage", Math.max(1, Math.min(3, value)))}
+          onChange={(value) => update("leverage", Math.max(1, Math.min(2, value)))}
         />
       </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button><button className="secondary" onClick={() => void resetDailyLoss()} disabled={saving || !loaded}>Reset dagstap</button></div>{message && <p className="inline-message">{message}</p>}
     </section>
