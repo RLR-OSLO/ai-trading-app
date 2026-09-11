@@ -13,6 +13,17 @@ from .binance import BinanceCredentials, BinanceError
 from .derivatives import BinanceFuturesClient, BinanceMarginClient
 
 
+# Shorting is intentionally conservative: one live short position is tracked,
+# the stop/target have room for normal crypto noise, and a profitable move gets
+# protected before a reversal can turn it into a loss.
+SHORT_MIN_STOP_FRACTION = Decimal("0.015")
+SHORT_MIN_TARGET_FRACTION = Decimal("0.030")
+SHORT_TRAIL_ACTIVATION_FRACTION = Decimal("0.010")
+SHORT_TRAIL_GAP_FRACTION = Decimal("0.0075")
+SHORT_TRAIL_LOCK_FRACTION = Decimal("0.0025")
+SHORT_SIGNAL_EXIT_MIN_PROFIT_FRACTION = Decimal("0.0040")
+
+
 @dataclass
 class ShortPosition:
     mode: str
@@ -25,6 +36,9 @@ class ShortPosition:
     target_fraction: str
     leverage: int = 1
     protection_ids: tuple[int, ...] = ()
+    trough_price: str | None = None
+    trailing_active: bool = False
+    trailing_stop_price: str | None = None
 
 
 @dataclass
@@ -88,6 +102,47 @@ def _tick(client: BinanceMarginClient, symbol: str, price: Decimal) -> Decimal:
 def _record(report_trade: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]) -> None:
     if report_trade:
         report_trade(payload)
+
+
+def _update_short_position(position: ShortPosition, current: Decimal, current_signal: bool) -> str | None:
+    """Update a short's best price and return an exit reason when needed.
+
+    The exchange-side stop/target remains the last-resort protection. This local
+    layer adds a profit-locking trail and exits a profitable short when the
+    bearish signal disappears, without force-selling a trade that is still near
+    entry or in loss.
+    """
+    entry = Decimal(position.entry_price)
+    stop_fraction = Decimal(position.stop_fraction)
+    target_fraction = Decimal(position.target_fraction)
+    trough = Decimal(position.trough_price or position.entry_price)
+    if current < trough:
+        trough = current
+    position.trough_price = str(trough)
+
+    target_price = entry * (Decimal("1") - target_fraction)
+    if current <= target_price:
+        return "take_profit"
+
+    activation_price = entry * (Decimal("1") - SHORT_TRAIL_ACTIVATION_FRACTION)
+    if not position.trailing_active and current <= activation_price:
+        position.trailing_active = True
+        initial_stop = entry * (Decimal("1") - SHORT_TRAIL_LOCK_FRACTION)
+        position.trailing_stop_price = str(max(initial_stop, trough * (Decimal("1") + SHORT_TRAIL_GAP_FRACTION)))
+    elif position.trailing_active:
+        old_stop = Decimal(position.trailing_stop_price or (entry * (Decimal("1") - SHORT_TRAIL_LOCK_FRACTION)))
+        position.trailing_stop_price = str(min(old_stop, trough * (Decimal("1") + SHORT_TRAIL_GAP_FRACTION)))
+
+    if position.trailing_active and current >= Decimal(position.trailing_stop_price):
+        return "trailing_stop"
+
+    if not current_signal and current <= entry * (Decimal("1") - SHORT_SIGNAL_EXIT_MIN_PROFIT_FRACTION):
+        return "signal_reversal"
+
+    hard_stop = entry * (Decimal("1") + stop_fraction)
+    if current >= hard_stop:
+        return "hard_stop"
+    return None
 
 
 def _close_margin(
@@ -159,7 +214,7 @@ def _open_margin(
     entry = received / executed
     take_profit = _tick(client, symbol, entry * (Decimal("1") - target_fraction))
     stop = _tick(client, symbol, entry * (Decimal("1") + stop_fraction))
-    position = ShortPosition("margin", symbol, str(executed), str(entry), str(received), int(time.time()), str(stop_fraction), str(target_fraction))
+    position = ShortPosition("margin", symbol, str(executed), str(entry), str(received), int(time.time()), str(stop_fraction), str(target_fraction), trough_price=str(entry))
     state.position = position
     save_state(path, state)
     try:
@@ -229,7 +284,7 @@ def _open_futures(
     entry = Decimal(str(order.get("avgPrice") or client.ticker_price(symbol)))
     if entry <= 0:
         raise BinanceError("Futures short entry returned invalid price")
-    position = ShortPosition("futures", symbol, str(quantity), str(entry), str(entry * quantity), int(time.time()), str(stop_fraction), str(target_fraction), leverage)
+    position = ShortPosition("futures", symbol, str(quantity), str(entry), str(entry * quantity), int(time.time()), str(stop_fraction), str(target_fraction), leverage, trough_price=str(entry))
     state.position = position
     save_state(path, state)
     stop_price = entry * (Decimal("1") + stop_fraction)
@@ -284,10 +339,11 @@ def run_short_cycle(
                 save_state(state_path, state)
                 return f"futures_short_closed_exchange:{position.symbol}"
             current = client.ticker_price(position.symbol)
-            entry = Decimal(position.entry_price)
-            if current >= entry * (Decimal("1") + Decimal(position.stop_fraction) * Decimal("1.10")):
-                return _close_futures(client, state, state_path, "local_emergency_stop", report_trade)
-            return f"futures_short_holding:{position.symbol}:signal={current_signal}"
+            reason = _update_short_position(position, current, current_signal)
+            save_state(state_path, state)
+            if reason:
+                return _close_futures(client, state, state_path, reason, report_trade)
+            return f"futures_short_holding:{position.symbol}:signal={current_signal}:trail={position.trailing_active}"
         client = BinanceMarginClient(credentials=credentials)
         if position.protection_ids:
             try:
@@ -299,10 +355,11 @@ def run_short_cycle(
             except BinanceError:
                 pass
         current = client.ticker_price(position.symbol)
-        entry = Decimal(position.entry_price)
-        if current >= entry * (Decimal("1") + Decimal(position.stop_fraction) * Decimal("1.10")):
-            return _close_margin(client, state, state_path, "local_emergency_stop", report_trade)
-        return f"margin_short_holding:{position.symbol}:signal={current_signal}"
+        reason = _update_short_position(position, current, current_signal)
+        save_state(state_path, state)
+        if reason:
+            return _close_margin(client, state, state_path, reason, report_trade)
+        return f"margin_short_holding:{position.symbol}:signal={current_signal}:trail={position.trailing_active}"
 
     if not allow_new_entries:
         return "short_new_entries_paused"
@@ -325,10 +382,14 @@ def run_short_cycle(
     if notional < Decimal("5"):
         return "short_notional_below_minimum"
 
-    stop_fraction = Decimal(str(settings.get("stop_loss_percent", "1"))) / Decimal("100")
-    target_fraction = Decimal(str(settings.get("take_profit_percent", "2"))) / Decimal("100")
+    configured_stop = Decimal(str(settings.get("stop_loss_percent", "1"))) / Decimal("100")
+    configured_target = Decimal(str(settings.get("take_profit_percent", "2"))) / Decimal("100")
+    # Use a wider short stop and a larger target than the old 1%/2% defaults.
+    # The local trail protects a winner before the wider hard stop is reached.
+    stop_fraction = max(configured_stop, SHORT_MIN_STOP_FRACTION)
+    target_fraction = max(configured_target, SHORT_MIN_TARGET_FRACTION)
     use_futures = bool(settings.get("futures_enabled")) and str(settings.get("risk_profile", "normal")) == "extreme"
     if use_futures:
-        leverage = max(1, min(3, int(settings.get("leverage", 1))))
+        leverage = max(1, min(2, int(settings.get("leverage", 1))))
         return _open_futures(credentials, symbol, notional, leverage, stop_fraction, target_fraction, state, state_path, report_trade)
     return _open_margin(credentials, symbol, notional, stop_fraction, target_fraction, state, state_path, report_trade)
