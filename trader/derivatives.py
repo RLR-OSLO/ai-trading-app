@@ -157,8 +157,8 @@ class BinanceFuturesClient(BinanceSpotClient):
     def set_leverage(self, *, symbol: str, leverage: int, live_trading_enabled: bool) -> dict[str, Any]:
         if not live_trading_enabled:
             raise BinanceError("Futures live-trading safety lock is disabled")
-        if not 1 <= leverage <= 3:
-            raise ValueError("Futures leverage safety range is 1x-3x")
+        if not 1 <= leverage <= 20:
+            raise ValueError("Futures leverage safety range is 1x-20x")
         return self._request("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage}, signed=True)
 
     def set_isolated_margin(self, *, symbol: str, live_trading_enabled: bool) -> dict[str, Any] | None:
