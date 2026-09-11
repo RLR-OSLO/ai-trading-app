@@ -292,8 +292,9 @@ export default function TradingDashboard() {
 
 
   const bestSetups = useMemo(() => {
+    type SetupDirection = "LONG" | "SHORT" | "VENT";
     const field = (name: string): string | null => {
-      const match = lastEvent?.message.match(new RegExp(`(?:^|;)${name}=([^;]+)`));
+      const match = lastEvent?.message.match(new RegExp(\`(?:^|;)\${name}=([^;]+)\`));
       return match?.[1] ?? null;
     };
     const mapScores = (name: string) => {
@@ -307,34 +308,70 @@ export default function TradingDashboard() {
       }
       return map;
     };
+
     const markets = (field("markets") ?? "").split(",").filter(Boolean);
     const longRaw = field("signals") ?? "none";
     const shortRaw = field("shorts") ?? "none";
     const longSymbols = new Set(longRaw === "none" ? [] : longRaw.split(",").map((item) => item.split(":")[0]));
-    const shortSymbols = new Set(shortRaw === "none" ? [] : shortRaw.split(","));
+    const shortSymbols = new Set(shortRaw === "none" ? [] : shortRaw.split(",").map((item) => item.split(":")[0]));
     const swing = mapScores("scores");
     const scalp = mapScores("scalp_scores");
     const short = mapScores("short_scores");
     const threshold = Math.max(1, Number(field("threshold") ?? 4));
+    const configuredLeverage = Math.max(1, Math.min(20, Number(settings.leverage) || 1));
+    const riskLeverageCeiling = settings.risk_profile === "extreme" ? 5 : settings.risk_profile === "high" ? 3 : 1;
 
-    return markets.map((symbol) => {
+    const candidates: Array<{
+      symbol: string;
+      direction: SetupDirection;
+      mode: string;
+      rawScore: number;
+      longScore: number;
+      shortScore: number;
+      rank: number;
+      grade: string;
+      suggested: number;
+      recommendedLeverage: number;
+      canExecute: boolean;
+    }> = [];
+
+    const addCandidate = (symbol: string, direction: SetupDirection, rawScore: number, longScore: number, shortScore: number) => {
+      const signalBonus = direction === "VENT" ? 0 : 3;
+      const rank = rawScore + signalBonus + (direction === "LONG" && (longRaw.includes(\`\${symbol}:bullrun\`) || longRaw.includes(\`\${symbol}:scalp\`)) ? 1 : 0);
+      const ratio = rawScore / threshold;
+      const grade = direction === "VENT" ? "C" : ratio >= 1.45 ? "A" : ratio >= 1.05 ? "B" : "C";
+      const sizeFactor = grade === "A" ? 1 : grade === "B" ? 0.7 : 0.4;
+      const mode = direction === "LONG"
+        ? "SPOT"
+        : direction === "SHORT"
+          ? settings.futures_enabled && settings.risk_profile === "extreme" ? "FUTURES" : settings.short_enabled ? "MARGIN" : "SHORT AV"
+          : "INGEN HANDEL";
+      const walletAvailable = mode === "FUTURES" ? futuresAvailable : spotAvailable;
+      const suggested = Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc), walletAvailable) * sizeFactor;
+      const recommendedLeverage = direction === "SHORT" && mode === "FUTURES"
+        ? Math.min(riskLeverageCeiling, rawScore >= threshold * 1.7 ? 3 : rawScore >= threshold * 1.35 ? 2 : 1)
+        : 1;
+      const canExecute = direction === "LONG" || (direction === "SHORT" && (mode === "MARGIN" || mode === "FUTURES"));
+      candidates.push({ symbol, direction, mode, rawScore, longScore, shortScore, rank, grade, suggested, recommendedLeverage, canExecute });
+    };
+
+    for (const symbol of markets) {
       const longScore = Math.max(swing.get(symbol) ?? 0, scalp.get(symbol) ?? 0);
       const shortScore = short.get(symbol) ?? 0;
       const hasLong = longSymbols.has(symbol);
       const hasShort = shortSymbols.has(symbol);
-      const direction: "LONG" | "SHORT" | "VENT" = hasLong ? "LONG" : hasShort ? "SHORT" : "VENT";
-      const rawScore = direction === "SHORT" ? shortScore : longScore;
-      const signalBonus = direction === "VENT" ? 0 : 3;
-      const rank = rawScore + signalBonus + (direction === "LONG" && (longRaw.includes(`${symbol}:bullrun`) || longRaw.includes(`${symbol}:scalp`)) ? 1 : 0);
-      const ratio = rawScore / threshold;
-      const grade = direction === "VENT" ? "C" : ratio >= 1.45 ? "A" : ratio >= 1.05 ? "B" : "C";
-      const sizeFactor = grade === "A" ? 1 : grade === "B" ? 0.7 : 0.4;
-      const mode = direction === "LONG" ? "SPOT" : direction === "SHORT" ? (settings.futures_enabled && settings.risk_profile === "extreme" ? `FUTURES ${settings.leverage}x` : settings.short_enabled ? "MARGIN" : "SHORT AV") : "INGEN HANDEL";
-      const walletAvailable = mode.startsWith("FUTURES") ? futuresAvailable : spotAvailable;
-      const suggested = Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc), walletAvailable) * sizeFactor;
-      const recommendedLeverage = direction === "SHORT" && shortScore >= 9 ? 10 : 1;
-      return { symbol, direction, mode, rawScore, longScore, shortScore, rank, grade, suggested, recommendedLeverage };
-    }).sort((a, b) => b.rank - a.rank || b.rawScore - a.rawScore).slice(0, 3);
+
+      // Long and short are separate opportunities. If both are present, both are
+      // shown and ranked instead of silently discarding the short alternative.
+      if (hasLong) addCandidate(symbol, "LONG", longScore, longScore, shortScore);
+      if (hasShort) addCandidate(symbol, "SHORT", shortScore, longScore, shortScore);
+      if (!hasLong && !hasShort) addCandidate(symbol, "VENT", 0, longScore, shortScore);
+    }
+
+    return candidates
+      .sort((a, b) => b.rank - a.rank || b.rawScore - a.rawScore || a.symbol.localeCompare(b.symbol))
+      .slice(0, 6)
+      .map((setup) => ({ ...setup, configuredLeverage }));
   }, [lastEvent, settings.order_size_usdc, settings.trade_cap_usdc, settings.futures_enabled, settings.short_enabled, settings.risk_profile, settings.leverage, availableCapital, spotAvailable, futuresAvailable]);
 
   useEffect(() => {
@@ -518,30 +555,34 @@ export default function TradingDashboard() {
     setPriorityBusy(null);
   }
 
-  async function prioritizeSetup(setup: { symbol: string; direction: "LONG" | "SHORT" | "VENT"; mode: string; suggested: number }) {
+  async function prioritizeSetup(setup: { symbol: string; direction: "LONG" | "SHORT" | "VENT"; mode: string; suggested: number; recommendedLeverage: number; configuredLeverage: number; canExecute: boolean }) {
     if (setup.direction === "VENT") return;
-    const requestedAmount = Number(setupAmounts[setup.symbol] ?? setup.suggested.toFixed(2));
+    if (!setup.canExecute) { setMessage("Shorting er ikke aktivert i innstillingene."); return; }
+    const amountKey = \`\${setup.symbol}:\${setup.direction}\`;
+    const requestedAmount = Number(setupAmounts[amountKey] ?? setup.suggested.toFixed(2));
     if (!Number.isFinite(requestedAmount) || requestedAmount < 5) { setMessage("Beløpet må være minst 5 USDC."); return; }
     const hardMax = Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc));
-    if (requestedAmount > hardMax) { setMessage(`Beløpet kan ikke være høyere enn ${money(hardMax)} ${settings.quote_asset}.`); return; }
-    const confirmed = window.confirm(`Be boten prioritere og gjennomføre ${setup.direction} ${setup.symbol} via ${setup.mode} for ${money(requestedAmount)} ${settings.quote_asset}? Alle vanlige risikogrenser gjelder fortsatt.`);
+    if (requestedAmount > hardMax) { setMessage(\`Beløpet kan ikke være høyere enn \${money(hardMax)} \${settings.quote_asset}.\`); return; }
+    const cleanMode = setup.mode.startsWith("FUTURES") ? "FUTURES" : setup.mode === "MARGIN" ? "MARGIN" : "SPOT";
+    const activeLeverage = Math.max(1, Math.min(20, Number(settings.leverage) || 1));
+    const leverageText = setup.direction === "SHORT" ? \`Anbefalt \${setup.recommendedLeverage}x. Aktiv innstilling: \${activeLeverage}x.\` : "Spot gjennomføres uten gearing.";
+    const confirmed = window.confirm(\`Be boten prioritere og gjennomføre \${setup.direction} \${setup.symbol} via \${setup.mode} for \${money(requestedAmount)} \${settings.quote_asset}? \${leverageText} Alle vanlige risikogrenser gjelder fortsatt.\`);
     if (!confirmed) return;
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) { setMessage("Du må være innlogget."); return; }
-    const cleanMode = setup.mode.startsWith("FUTURES") ? "FUTURES" : setup.mode === "MARGIN" ? "MARGIN" : "SPOT";
     const { data: created, error } = await supabase.from("trade_directives").insert({
       user_id: userData.user.id,
       symbol: setup.symbol,
       direction: setup.direction,
       mode: cleanMode,
       requested_notional: requestedAmount,
-      leverage: cleanMode === "FUTURES" ? Math.max(1, Math.min(3, settings.leverage)) : 1,
+      leverage: cleanMode === "FUTURES" ? activeLeverage : 1,
     }).select("id,symbol,direction,mode,requested_notional,leverage,status,created_at,expires_at").single();
     if (error) {
-      setMessage(`Kunne ikke sende direktiv: ${error.message}`);
+      setMessage(\`Kunne ikke sende direktiv: \${error.message}\`);
     } else {
-      if (created) setPriorityDirectives((current) => [created as TradeDirective, ...current.filter((item) => item.symbol !== setup.symbol)]);
-      setMessage(`PRIORITERT: ${setup.direction} ${setup.symbol}. Boten forsøker på neste syklus hvis signalet fortsatt er gyldig.`);
+      if (created) setPriorityDirectives((current) => [created as TradeDirective, ...current.filter((item) => !(item.symbol === setup.symbol && item.direction === setup.direction))]);
+      setMessage(\`PRIORITERT: \${setup.direction} \${setup.symbol}. Boten forsøker på neste syklus hvis signalet fortsatt er gyldig.\`);
     }
   }
 
@@ -709,25 +750,24 @@ export default function TradingDashboard() {
       </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button><button className="secondary" onClick={() => void resetDailyLoss()} disabled={saving || !loaded}>Reset dagstap</button></div>{message && <p className="inline-message">{message}</p>}
     </section>
     <section className="panel best-setup-panel">
-      <div className="panel-head"><div><p className="eyebrow">BESTE OPPSETT AKKURAT NÅ</p><h3>Botens høyest rangerte muligheter</h3></div><div className="chart-actions"><div className="chart-range" aria-label="Grafperiode">{([3,6,12] as const).map((hours) => <button type="button" key={hours} className={historyHours === hours ? "active" : ""} onClick={() => setHistoryHours(hours)}>{hours}t</button>)}</div><button type="button" className="secondary compact" onClick={() => void load()}>Oppdater nå</button></div></div>
-      <p className="muted best-setup-intro">Rangert fra siste faktiske markedsscan. A = sterkest oppsett, B = godt oppsett, C = svakere/vent. Beløpet er et forslag innenfor dine nåværende grenser – ingen ordre sendes fra denne boksen.</p>
-      {bestSetups.length === 0 ? <p className="empty">Venter på ferske markedsdata.</p> : <div className="best-setup-grid">{bestSetups.map((setup, index) => <article className={`best-setup-card ${setup.direction.toLowerCase()}`} key={setup.symbol}>
-        <div className="best-setup-rank">#{index + 1}</div>
-        <div><span className={`setup-grade grade-${setup.grade.toLowerCase()}`}>{setup.grade}</span><strong>{setup.symbol}</strong></div>
-        <div className={`setup-direction ${setup.direction.toLowerCase()}`}>{setup.direction}</div>
-        <small>Modus: <b>{setup.mode}</b></small>
-        <small>Aktuell score: <b>{setup.rawScore}</b> · Long {setup.longScore} / Short {setup.shortScore}</small>
-        {setup.direction === "SHORT" && settings.futures_enabled && <small className="leverage-suggestion">Mulig nivå – ikke aktivert: <b>{setup.recommendedLeverage}x</b> {setup.recommendedLeverage >= 10 ? "må velges manuelt" : "konservativt alternativ"}</small>}
-        <Sparkline points={marketHistory[setup.symbol] ?? []} hours={historyHours} />
-        <div className="setup-amount"><small>Beløp ({settings.quote_asset}) · forslag {money(setup.suggested)}</small><input type="number" min={5} max={Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc))} step="1" value={setupAmounts[setup.symbol] ?? setup.suggested.toFixed(2)} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setSetupAmounts((current) => ({ ...current, [setup.symbol]: event.target.value }))} /></div>
-        {setup.direction !== "VENT" && (() => {
-          const active = priorityDirectives.find((item) => item.symbol === setup.symbol && item.direction === setup.direction);
-          return active
-            ? <div className="priority-active"><span className="priority-active-badge">PRIORITERT</span><button type="button" className="danger compact" disabled={priorityBusy === active.id} onClick={() => void stopPriority(active)}>{priorityBusy === active.id ? "Stopper …" : "Stopp prioritet"}</button></div>
-            : <button type="button" className="primary compact" onClick={() => void prioritizeSetup(setup)}>Prioriter og gjennomfør</button>;
-        })()}
-      </article>)}</div>}
-      <p className="muted best-setup-note">«Prioriter og gjennomfør» sender et prioritert direktiv til boten som blir stående til det gjennomføres eller stoppes – ikke en Binance-ordre fra nettleseren. Boten gjennomfører bare dersom samme signal fortsatt er gyldig og alle vanlige stop-loss-, dagstap-, kapital-, cooldown- og posisjonsgrenser fortsatt er oppfylt.</p>
+      <div className="panel-head"><div><p className="eyebrow">PRIORITER OG GJENNOMFØR</p><h3>Seks høyest rangerte muligheter akkurat nå</h3></div><div className="chart-actions"><div className="chart-range" aria-label="Grafperiode">{([3,6,12] as const).map((hours) => <button type="button" key={hours} className={historyHours === hours ? "active" : ""} onClick={() => setHistoryHours(hours)}>{hours}t</button>)}</div><button type="button" className="secondary compact" onClick={() => void load()}>Oppdater nå</button></div></div>
+      <p className="muted best-setup-intro">Long/spot og short/margin/futures rangeres samlet. En short kan derfor ligge foran en spot-mulighet når det bearish signalet er sterkere. Anbefalt giring er kun et manuelt forslag – boten endrer aldri giringen automatisk.</p>
+      {bestSetups.length === 0 ? <p className="empty">Venter på ferske markedsdata.</p> : <div className="best-setup-grid">{bestSetups.map((setup, index) => {
+        const amountKey = \`\${setup.symbol}:\${setup.direction}\`;
+        const active = priorityDirectives.find((item) => item.symbol === setup.symbol && item.direction === setup.direction);
+        return <article className={\`best-setup-card \${setup.direction.toLowerCase()}\`} key={\`\${setup.symbol}-\${setup.direction}\`}>
+          <div className="best-setup-rank">#{index + 1}</div>
+          <div><span className={\`setup-grade grade-\${setup.grade.toLowerCase()}\`}>{setup.grade}</span><strong>{setup.symbol}</strong></div>
+          <div className={\`setup-direction \${setup.direction.toLowerCase()}\`}>{setup.direction === "VENT" ? "VENT" : setup.direction === "SHORT" ? "SHORT" : "LONG / SPOT"}</div>
+          <small>Modus: <b>{setup.mode}</b></small>
+          <small>Score: <b>{setup.rawScore}</b> · Long {setup.longScore} / Short {setup.shortScore}</small>
+          <small className="leverage-row">Anbefalt giring: <b>{setup.direction === "LONG" ? "1x · spot" : setup.mode === "FUTURES" ? \`\${setup.recommendedLeverage}x\` : setup.mode === "MARGIN" ? "1x · margin" : "1x · ikke aktivert"}</b>{setup.mode === "FUTURES" && \` · valgt innstilling \${setup.configuredLeverage}x\`}</small>
+          <Sparkline points={marketHistory[setup.symbol] ?? []} hours={historyHours} />
+          {setup.direction !== "VENT" && <div className="setup-amount"><small>Beløp ({settings.quote_asset}) · forslag {money(setup.suggested)}</small><input type="number" min={5} max={Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc))} step="1" value={setupAmounts[amountKey] ?? setup.suggested.toFixed(2)} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setSetupAmounts((current) => ({ ...current, [amountKey]: event.target.value }))} /></div>}
+          {setup.direction === "VENT" ? <div className="setup-eligibility">Ingen aktiv entry. Boten venter.</div> : active ? <div className="priority-active"><span className="priority-active-badge">PRIORITERT</span><button type="button" className="danger compact" disabled={priorityBusy === active.id} onClick={() => void stopPriority(active)}>{priorityBusy === active.id ? "Stopper …" : "Stopp prioritet"}</button></div> : !setup.canExecute ? <button type="button" className="secondary compact" disabled>Aktiver shorting for å gjennomføre</button> : <button type="button" className="primary compact" onClick={() => void prioritizeSetup(setup)}>Prioriter og gjennomfør</button>}
+        </article>;
+      })}</div>}
+      <p className="muted best-setup-note">Direktivet sendes til boten og blir stående til det gjennomføres eller stoppes. Boten gjennomfører bare dersom samme signal fortsatt er gyldig og vanlige stop-loss-, dagstap-, kapital-, cooldown- og posisjonsgrenser fortsatt er oppfylt.</p>
     </section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><span className="muted">Spot, Margin-short og Futures vises tydelig hver for seg</span></div>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
