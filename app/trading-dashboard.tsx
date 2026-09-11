@@ -318,7 +318,8 @@ export default function TradingDashboard() {
       const mode = direction === "LONG" ? "SPOT" : direction === "SHORT" ? (settings.futures_enabled && settings.risk_profile === "extreme" ? `FUTURES ${settings.leverage}x` : settings.short_enabled ? "MARGIN" : "SHORT AV") : "INGEN HANDEL";
       const walletAvailable = mode.startsWith("FUTURES") ? futuresAvailable : spotAvailable;
       const suggested = Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc), walletAvailable) * sizeFactor;
-      return { symbol, direction, mode, rawScore, longScore, shortScore, rank, grade, suggested };
+      const recommendedLeverage = direction === "SHORT" && shortScore >= 9 ? 10 : 1;
+      return { symbol, direction, mode, rawScore, longScore, shortScore, rank, grade, suggested, recommendedLeverage };
     }).sort((a, b) => b.rank - a.rank || b.rawScore - a.rawScore).slice(0, 3);
   }, [lastEvent, settings.order_size_usdc, settings.trade_cap_usdc, settings.futures_enabled, settings.short_enabled, settings.risk_profile, settings.leverage, availableCapital, spotAvailable, futuresAvailable]);
 
@@ -701,6 +702,7 @@ export default function TradingDashboard() {
         <div className={`setup-direction ${setup.direction.toLowerCase()}`}>{setup.direction}</div>
         <small>Modus: <b>{setup.mode}</b></small>
         <small>Aktuell score: <b>{setup.rawScore}</b> · Long {setup.longScore} / Short {setup.shortScore}</small>
+        {setup.direction === "SHORT" && settings.futures_enabled && <small className="leverage-suggestion">Botens forslag: <b>{setup.recommendedLeverage}x</b> {setup.recommendedLeverage >= 10 ? "kun ved ekstraordinært sterkt signal" : "konservativt nivå"}</small>}
         <Sparkline points={marketHistory[setup.symbol] ?? []} hours={historyHours} />
         <div className="setup-amount"><small>Beløp ({settings.quote_asset}) · forslag {money(setup.suggested)}</small><input type="number" min={5} max={Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc))} step="1" value={setupAmounts[setup.symbol] ?? setup.suggested.toFixed(2)} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setSetupAmounts((current) => ({ ...current, [setup.symbol]: event.target.value }))} /></div>
         {setup.direction !== "VENT" && (() => {
