@@ -175,6 +175,20 @@ export default function TradingDashboard() {
     return values;
   }, [lastEvent]);
 
+  const binanceWalletBreakdown = useMemo(() => {
+    const values = new Map<string, number>();
+    const match = lastEvent?.message.match(/(?:^|;)wallets=([^;]+)/);
+    if (!match || match[1] === "none" || match[1] === "unavailable") return values;
+    for (const item of match[1].split(",")) {
+      const separator = item.lastIndexOf(":");
+      if (separator <= 0) continue;
+      const name = item.slice(0, separator);
+      const value = Number(item.slice(separator + 1));
+      if (name && Number.isFinite(value) && value > 0) values.set(name, value);
+    }
+    return values;
+  }, [lastEvent]);
+
   const assets = useMemo(() => {
     const suffix = settings.quote_asset;
     const names = new Set<string>(MARKET_UNIVERSE);
@@ -631,6 +645,7 @@ export default function TradingDashboard() {
         <div className="wallet-total"><span className="label">TOTAL BINANCE-VERDI</span><strong>{money(totalAssets)} {settings.quote_asset}</strong><small>Spot + Futures</small></div>
         <div><span className="label">SPOT TOTALT</span><strong>{money(spotTotal)} {settings.quote_asset}</strong><small>Ledig Spot: {money(spotAvailable)} · Investert Spot: {money(portfolioValue)}</small></div>
         <div><span className="label">FUTURES TOTALT</span><strong>{money(futuresTotal)} {settings.quote_asset}</strong><small>Disponibelt: {money(futuresAvailable)} · Investert: {money(Math.max(0, futuresTotal - futuresAvailable))} {settings.quote_asset}</small></div>
+        <div className="wallet-other"><span className="label">ANDRE BINANCE-LØRER</span><strong>{binanceWalletBreakdown.size === 0 ? "–" : money(Array.from(binanceWalletBreakdown.values()).reduce((sum, value) => sum + value, 0))} {settings.quote_asset}</strong><small>{binanceWalletBreakdown.size === 0 ? "Ingen ekstra wallet-saldo registrert" : Array.from(binanceWalletBreakdown.entries()).map(([name, value]) => `${name}: ${money(value)}`).join(" · ")}</small><small>Vises separat og regnes ikke som ledig tradingkapital før overført til Spot/Futures.</small></div>
       </div>
     </section>
     <section className="grid metrics">
