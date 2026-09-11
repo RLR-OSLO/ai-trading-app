@@ -46,6 +46,52 @@ const MARKET_UNIVERSE = [
   "SUI", "XLM", "BCH", "LTC", "DOT", "SHIB", "TON", "HBAR", "UNI", "AAVE",
   "NEAR", "APT", "ETC", "FIL", "ICP", "ATOM", "ALGO", "VET", "POL", "ARB",
 ] as const;
+
+const COIN_HOME_URLS: Record<string, string> = {
+  BTC: "https://bitcoin.org/",
+  ETH: "https://ethereum.org/",
+  BNB: "https://www.bnbchain.org/",
+  SOL: "https://solana.com/",
+  XRP: "https://xrpl.org/",
+  DOGE: "https://dogecoin.com/",
+  ADA: "https://cardano.org/",
+  TRX: "https://tron.network/",
+  AVAX: "https://www.avax.network/",
+  LINK: "https://chain.link/",
+  SUI: "https://sui.io/",
+  XLM: "https://stellar.org/",
+  BCH: "https://bitcoincash.org/",
+  LTC: "https://litecoin.org/",
+  DOT: "https://polkadot.com/",
+  SHIB: "https://www.shib.io/",
+  TON: "https://ton.org/",
+  HBAR: "https://hedera.com/",
+  UNI: "https://uniswap.org/",
+  AAVE: "https://aave.com/",
+  NEAR: "https://near.org/",
+  APT: "https://aptosfoundation.org/",
+  ETC: "https://ethereumclassic.org/",
+  FIL: "https://filecoin.io/",
+  ICP: "https://internetcomputer.org/",
+  ATOM: "https://cosmos.network/",
+  ALGO: "https://algorand.co/",
+  VET: "https://vechain.org/",
+  POL: "https://polygon.technology/",
+  ARB: "https://arbitrum.io/",
+};
+
+function baseAsset(symbol: string) {
+  const normalized = symbol.toUpperCase().replace("/", "");
+  return normalized.endsWith("USDC") ? normalized.slice(0, -4) : normalized.endsWith("USDT") ? normalized.slice(0, -4) : normalized;
+}
+
+function CoinLink({ asset, label }: { asset: string; label: string }) {
+  const base = baseAsset(asset);
+  const url = COIN_HOME_URLS[base];
+  if (!url) return <span>{label}</span>;
+  return <a className="coin-link" href={url} target="_blank" rel="noopener noreferrer" title={`Åpne hjemmesiden til ${base} i ny fane`}>{label}<span className="coin-link-icon" aria-hidden="true">↗</span></a>;
+}
+
 const money = (value: number) => new Intl.NumberFormat("nb-NO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
 const crypto = (value: number) => new Intl.NumberFormat("nb-NO", { maximumFractionDigits: 8 }).format(value);
 
@@ -835,7 +881,7 @@ export default function TradingDashboard() {
           const resultValue = derivativeOpen ? (derivativeUnrealized ?? 0) : (unrealized ?? pnl);
           const spotStatus = resultValue > 0.00000001 ? "spot-gain" : resultValue < -0.00000001 ? "spot-loss" : "spot-neutral";
           const positionClass = derivativeOpen ? `derivative-${derivativeMode}` : spotStatus;
-          return <div className={`asset ${owned ? "invested " : ""}${positionClass}`} key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b>{owned && <span className="owned-badge spot-badge">SPOT</span>}{derivativeOpen && <span className={`owned-badge ${derivativeMode === "futures" ? "futures-badge" : "margin-badge"}`}>{derivativeMode === "futures" ? `SHORT · FUTURES · ${derivativeLeverage ?? 1}x` : "SHORT · MARGIN"}</span>}<small>Kjøpt for (Spot): {money(invested)} {settings.quote_asset} · Verdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`} · Eier: {crypto(quantity)} {asset}</small>{derivativeOpen && <small style={{ fontWeight: 700 }}>Short åpnet for: {money(derivativeEntryValue)} {settings.quote_asset} · Verdi nå: {money(derivativeCurrentValue)} {settings.quote_asset} · {derivativeMode === "futures" ? `Futures ${derivativeLeverage ?? 1}x` : "Margin/lån"} · Urealisert: {derivativeUnrealized === null ? "–" : `${derivativeUnrealized >= 0 ? "+" : ""}${money(derivativeUnrealized)} ${settings.quote_asset}`}</small>}<small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`}</small><Sparkline points={marketHistory[`${asset}${settings.quote_asset}`] ?? []} hours={historyHours} /></div><span className={resultValue < 0 ? "loss" : "gain"}>{derivativeOpen ? `${resultValue >= 0 ? "+" : ""}${money(resultValue)} ${settings.quote_asset}` : unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>;
+          return <div className={`asset ${owned ? "invested " : ""}${positionClass}`} key={asset}><span className="coin">{asset[0]}</span><div><b><CoinLink asset={asset} label={`${asset}/${settings.quote_asset}`} /></b>{owned && <span className="owned-badge spot-badge">SPOT</span>}{derivativeOpen && <span className={`owned-badge ${derivativeMode === "futures" ? "futures-badge" : "margin-badge"}`}>{derivativeMode === "futures" ? `SHORT · FUTURES · ${derivativeLeverage ?? 1}x` : "SHORT · MARGIN"}</span>}<small>Kjøpt for (Spot): {money(invested)} {settings.quote_asset} · Verdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`} · Eier: {crypto(quantity)} {asset}</small>{derivativeOpen && <small style={{ fontWeight: 700 }}>Short åpnet for: {money(derivativeEntryValue)} {settings.quote_asset} · Verdi nå: {money(derivativeCurrentValue)} {settings.quote_asset} · {derivativeMode === "futures" ? `Futures ${derivativeLeverage ?? 1}x` : "Margin/lån"} · Urealisert: {derivativeUnrealized === null ? "–" : `${derivativeUnrealized >= 0 ? "+" : ""}${money(derivativeUnrealized)} ${settings.quote_asset}`}</small>}<small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`}</small><Sparkline points={marketHistory[`${asset}${settings.quote_asset}`] ?? []} hours={historyHours} /></div><span className={resultValue < 0 ? "loss" : "gain"}>{derivativeOpen ? `${resultValue >= 0 ? "+" : ""}${money(resultValue)} ${settings.quote_asset}` : unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>;
         })}</div>
       </> : <div className="portfolio-table-wrap"><table className="portfolio-table"><thead><tr>{PORTFOLIO_SORT_COLUMNS.map(({ key, label }) => <th key={key} aria-sort={portfolioSort.key === key ? portfolioSort.direction === "asc" ? "ascending" : "descending" : "none"}><button type="button" className="portfolio-sort-button" onClick={() => togglePortfolioSort(key)}>{label}<span>{portfolioSort.key === key ? portfolioSort.direction === "asc" ? "↑" : "↓" : "↕"}</span></button></th>)}</tr></thead><tbody>{sortedAllocations.map((allocation) => {
           const type = allocation.derivativeOpen ? allocation.derivativeMode === "futures" ? "FUTURES SHORT" : "MARGIN SHORT" : allocation.owned ? "SPOT" : "—";
@@ -845,11 +891,11 @@ export default function TradingDashboard() {
           const quantityValue = allocation.derivativeOpen ? Number(allocation.derivativeQuantity ?? 0) : Number(allocation.quantity ?? 0);
           const status = allocation.derivativeOpen ? "Åpen short" : allocation.owned ? "Investert spot" : "Ikke investert";
           const resultClass = resultValue < 0 ? "loss" : "gain";
-          return <tr key={allocation.asset}><td><strong>{allocation.asset}/{settings.quote_asset}</strong></td><td><span className={`portfolio-type-badge ${allocation.derivativeOpen ? allocation.derivativeMode : allocation.owned ? "spot" : "none"}`}>{type}</span></td><td>{money(investedValue)} {settings.quote_asset}</td><td>{money(currentValue)} {settings.quote_asset}</td><td className={resultClass}>{resultValue >= 0 ? "+" : ""}{money(resultValue)} {settings.quote_asset}</td><td>{crypto(quantityValue)} {allocation.asset}</td><td>{allocation.currentPrice === null ? "–" : money(Number(allocation.currentPrice))}</td><td>{allocation.derivativeOpen ? `${allocation.derivativeLeverage ?? 1}x` : "1x"}</td><td><span className={`portfolio-status ${allocation.derivativeOpen ? "short" : allocation.owned ? "owned" : "empty"}`}>{status}</span></td></tr>;
+          return <tr key={allocation.asset}><td><strong><CoinLink asset={allocation.asset} label={`${allocation.asset}/${settings.quote_asset}`} /></strong></td><td><span className={`portfolio-type-badge ${allocation.derivativeOpen ? allocation.derivativeMode : allocation.owned ? "spot" : "none"}`}>{type}</span></td><td>{money(investedValue)} {settings.quote_asset}</td><td>{money(currentValue)} {settings.quote_asset}</td><td className={resultClass}>{resultValue >= 0 ? "+" : ""}{money(resultValue)} {settings.quote_asset}</td><td>{crypto(quantityValue)} {allocation.asset}</td><td>{allocation.currentPrice === null ? "–" : money(Number(allocation.currentPrice))}</td><td>{allocation.derivativeOpen ? `${allocation.derivativeLeverage ?? 1}x` : "1x"}</td><td><span className={`portfolio-status ${allocation.derivativeOpen ? "short" : allocation.owned ? "owned" : "empty"}`}>{status}</span></td></tr>;
         })}</tbody></table></div>}
       <p className="muted portfolio-help">Klikk på en kolonneoverskrift for å sortere. Klikk én gang til for motsatt rekkefølge. Grønn = positivt resultat. Rød = negativt resultat. Lilla = Margin-short. Oransje = Futures-short.</p>
     </section>
-    <section className="panel trade-history-panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><div className="trade-head-actions"><span className="muted">Oppdateres hvert 30. sekund</span><button type="button" className="secondary compact" onClick={() => void downloadTradesCsv()}>Last ned CSV</button></div></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list"><div className="trade-row trade-header"><span>Handel</span><span>Antall</span><span>Inngang</span><span>Utgang</span><span>Resultat</span><span>Tid</span></div>{trades.slice(0, 20).map((trade) => { const derivative = trade.mode === "margin" || trade.mode === "futures"; const modeClass = trade.mode === "futures" ? "trade-futures" : trade.mode === "margin" ? "trade-margin" : "trade-spot"; const label = trade.mode === "futures" ? `SHORT · FUTURES · ${Number(trade.leverage ?? 1)}x` : trade.mode === "margin" ? "SHORT · MARGIN" : "SPOT"; return <div className={`trade-row ${modeClass}`} key={trade.id}><div><span className={`trade-mode-badge ${modeClass}`}>{label}</span><b>{trade.side} {trade.symbol}</b><small>{derivative ? (trade.side === "SELL" ? "Åpnet short-posisjon" : "Lukket short-posisjon") : (trade.side === "BUY" ? "Kjøpt spot" : "Solgt spot")}</small></div><span>{Number(trade.quantity).toPrecision(6)}</span><span>{trade.entry_price == null ? "–" : money(Number(trade.entry_price))}</span><span>{trade.exit_price == null ? "ÅPEN" : money(Number(trade.exit_price))}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{trade.pnl == null ? "–" : `${Number(trade.pnl) >= 0 ? "+" : ""}${money(Number(trade.pnl))} ${settings.quote_asset}`}</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>; })}</div>}</section>
+    <section className="panel trade-history-panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><div className="trade-head-actions"><span className="muted">Oppdateres hvert 30. sekund</span><button type="button" className="secondary compact" onClick={() => void downloadTradesCsv()}>Last ned CSV</button></div></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list"><div className="trade-row trade-header"><span>Handel</span><span>Antall</span><span>Inngang</span><span>Utgang</span><span>Resultat</span><span>Tid</span></div>{trades.slice(0, 20).map((trade) => { const derivative = trade.mode === "margin" || trade.mode === "futures"; const modeClass = trade.mode === "futures" ? "trade-futures" : trade.mode === "margin" ? "trade-margin" : "trade-spot"; const label = trade.mode === "futures" ? `SHORT · FUTURES · ${Number(trade.leverage ?? 1)}x` : trade.mode === "margin" ? "SHORT · MARGIN" : "SPOT"; return <div className={`trade-row ${modeClass}`} key={trade.id}><div><span className={`trade-mode-badge ${modeClass}`}>{label}</span><b>{trade.side} <CoinLink asset={trade.symbol} label={trade.symbol} /></b><small>{derivative ? (trade.side === "SELL" ? "Åpnet short-posisjon" : "Lukket short-posisjon") : (trade.side === "BUY" ? "Kjøpt spot" : "Solgt spot")}</small></div><span>{Number(trade.quantity).toPrecision(6)}</span><span>{trade.entry_price == null ? "–" : money(Number(trade.entry_price))}</span><span>{trade.exit_price == null ? "ÅPEN" : money(Number(trade.exit_price))}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{trade.pnl == null ? "–" : `${Number(trade.pnl) >= 0 ? "+" : ""}${money(Number(trade.pnl))} ${settings.quote_asset}`}</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>; })}</div>}</section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">SERVERSTATUS</p><h3>Siste kontrollsignal</h3></div><div className="server-signal-actions">{lastEvent && <time className="muted">{new Date(lastEvent.created_at).toLocaleString("nb-NO")}</time>}<button type="button" className="secondary compact" onClick={() => setServerSignalExpanded((value) => !value)}>{serverSignalExpanded ? "Skjul" : "Utvid"}</button></div></div><p className={`server-signal ${serverSignalExpanded ? "expanded" : "collapsed"} ${lastEvent?.level === "error" ? "loss" : "muted"}`}>{lastEvent?.message ?? "Serverrapportering er ikke koblet til ennå."}</p></section>
     <section className="panel chat-panel"><div className="panel-head"><div><p className="eyebrow">TRADINGASSISTENT</p><h3>Spør om det boten faktisk gjør</h3></div><span className="muted">Basert på ferske Binance- og botdata</span></div>
       <div className="chat-log" aria-live="polite">{chatMessages.map((item) => <div className={`chat-bubble ${item.role}`} key={item.id}><small>{item.role === "boss" ? "SJEFEN" : "BOTTEN"}</small><p>{item.text}</p></div>)}</div>
