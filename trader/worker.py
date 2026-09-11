@@ -129,7 +129,29 @@ def free_quote_balance(client: BinanceSpotClient, quote_asset: str) -> Decimal:
     return Decimal("0")
 
 
-def binance_account_summary(client: BinanceSpotClient, quote_asset: str) -> tuple[str, Decimal, Decimal, str]:
+def binance_wallet_breakdown(client: BinanceSpotClient, quote_asset: str) -> str:
+    """Return the quote-asset balance by Binance wallet for dashboard diagnostics.
+
+    These balances are display-only. Only Spot/Futures balances used by the
+    existing trading paths are treated as available trading capital.
+    """
+    try:
+        rows = client.query_user_wallet_balance(quote_asset)
+    except Exception:
+        LOG.warning("could not read Binance wallet balance breakdown", exc_info=True)
+        return "unavailable"
+    values: list[str] = []
+    for row in rows or []:
+        name = str(row.get("walletName") or "").strip()
+        try:
+            balance = Decimal(str(row.get("balance", "0") or "0"))
+        except Exception:
+            continue
+        if name and balance > 0:
+            values.append(f"{name}:{balance}")
+    return ",".join(values) or "none"
+
+def binance_account_summary(client: BinanceSpotClient, quote_asset: str) -> tuple[str, Decimal, Decimal, str, str]:
     account = client.account()
     balances = {
         str(row.get("asset")): Decimal(str(row.get("free", "0"))) + Decimal(str(row.get("locked", "0")))
@@ -190,7 +212,8 @@ def binance_account_summary(client: BinanceSpotClient, quote_asset: str) -> tupl
             invested += value
     balance_text = ",".join(f"{asset}:{quantity}" for asset, quantity in balances.items()) or "none"
     wallet_value_text = ",".join(f"{asset}:{value}" for asset, value in wallet_values.items()) or "none"
-    return balance_text, total, invested, wallet_value_text
+    wallet_breakdown_text = binance_wallet_breakdown(client, quote_asset)
+    return balance_text, total, invested, wallet_value_text, wallet_breakdown_text
 
 
 def futures_wallet_summary(credentials: BinanceCredentials | None, quote_asset: str) -> tuple[Decimal, Decimal]:
@@ -446,14 +469,14 @@ def main() -> None:
                     for asset in MARKET_UNIVERSE
                     if f"{asset}{quote_asset}" in ticker_prices
                 )
-                balances_text, spot_total, invested_value, wallet_value_text = binance_account_summary(client, quote_asset)
+                balances_text, spot_total, invested_value, wallet_value_text, wallet_breakdown_text = binance_account_summary(client, quote_asset)
                 futures_total, futures_available = futures_wallet_summary(client.credentials, quote_asset)
                 account_total = spot_total + futures_total
                 reporter.record_event(
                     "heartbeat",
                     f"live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
                     f"signals={signal_text};scores={score_text};scalp_scores={scalp_score_text};short_scores={short_score_text};"
-                    f"prices={price_text};balances={balances_text};wallet_values={wallet_value_text};account_total={account_total};spot_total={spot_total};spot_available={available_balance};futures_total={futures_total};futures_available={futures_available};invested_value={invested_value};markets={','.join(pairs)};"
+                    f"prices={price_text};balances={balances_text};wallet_values={wallet_value_text};wallets={wallet_breakdown_text};account_total={account_total};spot_total={spot_total};spot_available={available_balance};futures_total={futures_total};futures_available={futures_available};invested_value={invested_value};markets={','.join(pairs)};"
                     f"best={best_pair}:{strategies[best_pair]}:{analyses[best_pair].score}/{scalp_analyses[best_pair].score};"
                     f"reasons={','.join(scalp_analyses[best_pair].reasons if strategies[best_pair] == 'scalp' else analyses[best_pair].reasons)}",
                 )
