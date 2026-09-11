@@ -21,10 +21,12 @@ def test_futures_order_requires_live_lock():
         client.market_order(symbol="BTCUSDT", side="SELL", quantity=Decimal("0.001"), live_trading_enabled=False)
 
 
-def test_futures_leverage_is_capped():
+def test_futures_leverage_allows_guarded_range():
     client = BinanceFuturesClient(CREDS)
+    client._request = lambda *args, **kwargs: {"leverage": 20}
+    assert client.set_leverage(symbol="BTCUSDT", leverage=20, live_trading_enabled=True)["leverage"] == 20
     with pytest.raises(ValueError):
-        client.set_leverage(symbol="BTCUSDT", leverage=4, live_trading_enabled=True)
+        client.set_leverage(symbol="BTCUSDT", leverage=21, live_trading_enabled=True)
 
 
 def test_capability_snapshot_maps_account_and_api_flags(monkeypatch):

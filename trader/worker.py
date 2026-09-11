@@ -27,6 +27,12 @@ MIN_24H_QUOTE_VOLUME = Decimal(os.getenv("MIN_24H_QUOTE_VOLUME", "5000000"))
 MIN_24H_TRADES = int(os.getenv("MIN_24H_TRADES", "5000"))
 MAX_SPREAD_BPS = Decimal(os.getenv("MAX_SPREAD_BPS", "20"))
 BULLRUN_MAX_HOLD_SECONDS = int(os.getenv("BULLRUN_MAX_HOLD_SECONDS", "21600"))
+PROTECTION_DEFAULTS = {
+    "low": ("0.75", "1.5"),
+    "normal": ("1.0", "2.0"),
+    "high": ("1.5", "3.0"),
+    "extreme": ("1.75", "3.5"),
+}
 MARKET_UNIVERSE = (
     "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LINK",
     "SUI", "XLM", "BCH", "LTC", "DOT", "SHIB", "TON", "HBAR", "UNI", "AAVE",
@@ -427,7 +433,19 @@ def main() -> None:
                         analyses[pair].score,
                     ),
                 )
-                price_text = ",".join(f"{pair}:{client.ticker_price(pair)}" for pair in pairs)
+                # Store heartbeat prices for the full approved universe so the dashboard
+                # can draw history for every currency, not only the five currently scanned.
+                ticker_rows = client._request("GET", "/api/v3/ticker/price")
+                ticker_prices = {
+                    str(row.get("symbol")): str(row.get("price"))
+                    for row in ticker_rows
+                    if row.get("symbol") in {f"{asset}{quote_asset}" for asset in MARKET_UNIVERSE}
+                }
+                price_text = ",".join(
+                    f"{asset}{quote_asset}:{ticker_prices[f'{asset}{quote_asset}']}"
+                    for asset in MARKET_UNIVERSE
+                    if f"{asset}{quote_asset}" in ticker_prices
+                )
                 balances_text, spot_total, invested_value, wallet_value_text = binance_account_summary(client, quote_asset)
                 futures_total, futures_available = futures_wallet_summary(client.credentials, quote_asset)
                 account_total = spot_total + futures_total
@@ -444,6 +462,14 @@ def main() -> None:
             runtime_settings = dict(settings or {})
             if settings is None:
                 runtime_settings["trade_cap_usdc"] = str(max(available_balance, Decimal("5")))
+            # Protection percentages are strategy-owned, not user-tuned. Keep the
+            # legacy database columns for compatibility, but always derive the
+            # active values from the selected risk profile.
+            protection_stop, protection_activation = PROTECTION_DEFAULTS.get(
+                risk_profile, PROTECTION_DEFAULTS["normal"]
+            )
+            runtime_settings["stop_loss_percent"] = protection_stop
+            runtime_settings["take_profit_percent"] = protection_activation
             stop_overrides: dict[str, Decimal] = {}
             activation_overrides: dict[str, Decimal] = {}
             size_multipliers: dict[str, Decimal] = {}
@@ -457,7 +483,7 @@ def main() -> None:
                 size_multipliers[pair] = max(Decimal("0.20"), min(Decimal("1"), base_size * learned_factor))
                 if strategy == "bullrun":
                     stop, activation, size_multiplier = bullrun_profile(
-                        analyses[pair], (settings or {}).get("stop_loss_percent", "1"), risk_profile
+                        analyses[pair], runtime_settings.get("stop_loss_percent", "1"), risk_profile
                     )
                     stop_overrides[pair] = stop
                     activation_overrides[pair] = activation
@@ -507,7 +533,7 @@ def main() -> None:
                     client.credentials,
                     short_signals,
                     short_confidences,
-                    settings,
+                    runtime_settings,
                     Path(os.getenv("DERIVATIVES_STATE_PATH", "/var/lib/ai-trading-app/derivatives-state.json")),
                     reporter.record_trade if reporter else None,
                     spot_realized_pnl=Decimal(spot_state.realized_pnl),
