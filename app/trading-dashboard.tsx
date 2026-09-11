@@ -294,7 +294,7 @@ export default function TradingDashboard() {
   const bestSetups = useMemo(() => {
     type SetupDirection = "LONG" | "SHORT" | "VENT";
     const field = (name: string): string | null => {
-      const match = lastEvent?.message.match(new RegExp(\`(?:^|;)\${name}=([^;]+)\`));
+      const match = lastEvent?.message.match(new RegExp(`(?:^|;)${name}=([^;]+)`));
       return match?.[1] ?? null;
     };
     const mapScores = (name: string) => {
@@ -337,7 +337,7 @@ export default function TradingDashboard() {
 
     const addCandidate = (symbol: string, direction: SetupDirection, rawScore: number, longScore: number, shortScore: number) => {
       const signalBonus = direction === "VENT" ? 0 : 3;
-      const rank = rawScore + signalBonus + (direction === "LONG" && (longRaw.includes(\`\${symbol}:bullrun\`) || longRaw.includes(\`\${symbol}:scalp\`)) ? 1 : 0);
+      const rank = rawScore + signalBonus + (direction === "LONG" && (longRaw.includes(`${symbol}:bullrun`) || longRaw.includes(`${symbol}:scalp`)) ? 1 : 0);
       const ratio = rawScore / threshold;
       const grade = direction === "VENT" ? "C" : ratio >= 1.45 ? "A" : ratio >= 1.05 ? "B" : "C";
       const sizeFactor = grade === "A" ? 1 : grade === "B" ? 0.7 : 0.4;
@@ -558,15 +558,15 @@ export default function TradingDashboard() {
   async function prioritizeSetup(setup: { symbol: string; direction: "LONG" | "SHORT" | "VENT"; mode: string; suggested: number; recommendedLeverage: number; configuredLeverage: number; canExecute: boolean }) {
     if (setup.direction === "VENT") return;
     if (!setup.canExecute) { setMessage("Shorting er ikke aktivert i innstillingene."); return; }
-    const amountKey = \`\${setup.symbol}:\${setup.direction}\`;
+    const amountKey = `${setup.symbol}:${setup.direction}`;
     const requestedAmount = Number(setupAmounts[amountKey] ?? setup.suggested.toFixed(2));
     if (!Number.isFinite(requestedAmount) || requestedAmount < 5) { setMessage("Beløpet må være minst 5 USDC."); return; }
     const hardMax = Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc));
-    if (requestedAmount > hardMax) { setMessage(\`Beløpet kan ikke være høyere enn \${money(hardMax)} \${settings.quote_asset}.\`); return; }
+    if (requestedAmount > hardMax) { setMessage(`Beløpet kan ikke være høyere enn ${money(hardMax)} ${settings.quote_asset}.`); return; }
     const cleanMode = setup.mode.startsWith("FUTURES") ? "FUTURES" : setup.mode === "MARGIN" ? "MARGIN" : "SPOT";
     const activeLeverage = Math.max(1, Math.min(20, Number(settings.leverage) || 1));
-    const leverageText = setup.direction === "SHORT" ? \`Anbefalt \${setup.recommendedLeverage}x. Aktiv innstilling: \${activeLeverage}x.\` : "Spot gjennomføres uten gearing.";
-    const confirmed = window.confirm(\`Be boten prioritere og gjennomføre \${setup.direction} \${setup.symbol} via \${setup.mode} for \${money(requestedAmount)} \${settings.quote_asset}? \${leverageText} Alle vanlige risikogrenser gjelder fortsatt.\`);
+    const leverageText = setup.direction === "SHORT" ? `Anbefalt ${setup.recommendedLeverage}x. Aktiv innstilling: ${activeLeverage}x.` : "Spot gjennomføres uten gearing.";
+    const confirmed = window.confirm(`Be boten prioritere og gjennomføre ${setup.direction} ${setup.symbol} via ${setup.mode} for ${money(requestedAmount)} ${settings.quote_asset}? ${leverageText} Alle vanlige risikogrenser gjelder fortsatt.`);
     if (!confirmed) return;
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) { setMessage("Du må være innlogget."); return; }
@@ -579,10 +579,10 @@ export default function TradingDashboard() {
       leverage: cleanMode === "FUTURES" ? activeLeverage : 1,
     }).select("id,symbol,direction,mode,requested_notional,leverage,status,created_at,expires_at").single();
     if (error) {
-      setMessage(\`Kunne ikke sende direktiv: \${error.message}\`);
+      setMessage(`Kunne ikke sende direktiv: ${error.message}`);
     } else {
       if (created) setPriorityDirectives((current) => [created as TradeDirective, ...current.filter((item) => !(item.symbol === setup.symbol && item.direction === setup.direction))]);
-      setMessage(\`PRIORITERT: \${setup.direction} \${setup.symbol}. Boten forsøker på neste syklus hvis signalet fortsatt er gyldig.\`);
+      setMessage(`PRIORITERT: ${setup.direction} ${setup.symbol}. Boten forsøker på neste syklus hvis signalet fortsatt er gyldig.`);
     }
   }
 
@@ -753,15 +753,15 @@ export default function TradingDashboard() {
       <div className="panel-head"><div><p className="eyebrow">PRIORITER OG GJENNOMFØR</p><h3>Seks høyest rangerte muligheter akkurat nå</h3></div><div className="chart-actions"><div className="chart-range" aria-label="Grafperiode">{([3,6,12] as const).map((hours) => <button type="button" key={hours} className={historyHours === hours ? "active" : ""} onClick={() => setHistoryHours(hours)}>{hours}t</button>)}</div><button type="button" className="secondary compact" onClick={() => void load()}>Oppdater nå</button></div></div>
       <p className="muted best-setup-intro">Long/spot og short/margin/futures rangeres samlet. En short kan derfor ligge foran en spot-mulighet når det bearish signalet er sterkere. Anbefalt giring er kun et manuelt forslag – boten endrer aldri giringen automatisk.</p>
       {bestSetups.length === 0 ? <p className="empty">Venter på ferske markedsdata.</p> : <div className="best-setup-grid">{bestSetups.map((setup, index) => {
-        const amountKey = \`\${setup.symbol}:\${setup.direction}\`;
+        const amountKey = `${setup.symbol}:${setup.direction}`;
         const active = priorityDirectives.find((item) => item.symbol === setup.symbol && item.direction === setup.direction);
-        return <article className={\`best-setup-card \${setup.direction.toLowerCase()}\`} key={\`\${setup.symbol}-\${setup.direction}\`}>
+        return <article className={`best-setup-card ${setup.direction.toLowerCase()}`} key={`${setup.symbol}-${setup.direction}`}>
           <div className="best-setup-rank">#{index + 1}</div>
-          <div><span className={\`setup-grade grade-\${setup.grade.toLowerCase()}\`}>{setup.grade}</span><strong>{setup.symbol}</strong></div>
-          <div className={\`setup-direction \${setup.direction.toLowerCase()}\`}>{setup.direction === "VENT" ? "VENT" : setup.direction === "SHORT" ? "SHORT" : "LONG / SPOT"}</div>
+          <div><span className={`setup-grade grade-${setup.grade.toLowerCase()}`}>{setup.grade}</span><strong>{setup.symbol}</strong></div>
+          <div className={`setup-direction ${setup.direction.toLowerCase()}`}>{setup.direction === "VENT" ? "VENT" : setup.direction === "SHORT" ? "SHORT" : "LONG / SPOT"}</div>
           <small>Modus: <b>{setup.mode}</b></small>
           <small>Score: <b>{setup.rawScore}</b> · Long {setup.longScore} / Short {setup.shortScore}</small>
-          <small className="leverage-row">Anbefalt giring: <b>{setup.direction === "LONG" ? "1x · spot" : setup.mode === "FUTURES" ? \`\${setup.recommendedLeverage}x\` : setup.mode === "MARGIN" ? "1x · margin" : "1x · ikke aktivert"}</b>{setup.mode === "FUTURES" && \` · valgt innstilling \${setup.configuredLeverage}x\`}</small>
+          <small className="leverage-row">Anbefalt giring: <b>{setup.direction === "LONG" ? "1x · spot" : setup.mode === "FUTURES" ? `${setup.recommendedLeverage}x` : setup.mode === "MARGIN" ? "1x · margin" : "1x · ikke aktivert"}</b>{setup.mode === "FUTURES" && ` · valgt innstilling ${setup.configuredLeverage}x`}</small>
           <Sparkline points={marketHistory[setup.symbol] ?? []} hours={historyHours} />
           {setup.direction !== "VENT" && <div className="setup-amount"><small>Beløp ({settings.quote_asset}) · forslag {money(setup.suggested)}</small><input type="number" min={5} max={Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc))} step="1" value={setupAmounts[amountKey] ?? setup.suggested.toFixed(2)} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setSetupAmounts((current) => ({ ...current, [amountKey]: event.target.value }))} /></div>}
           {setup.direction === "VENT" ? <div className="setup-eligibility">Ingen aktiv entry. Boten venter.</div> : active ? <div className="priority-active"><span className="priority-active-badge">PRIORITERT</span><button type="button" className="danger compact" disabled={priorityBusy === active.id} onClick={() => void stopPriority(active)}>{priorityBusy === active.id ? "Stopper …" : "Stopp prioritet"}</button></div> : !setup.canExecute ? <button type="button" className="secondary compact" disabled>Aktiver shorting for å gjennomføre</button> : <button type="button" className="primary compact" onClick={() => void prioritizeSetup(setup)}>Prioriter og gjennomfør</button>}
