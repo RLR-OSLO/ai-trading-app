@@ -103,6 +103,17 @@ class BinanceSpotClient:
             {"symbol": symbol, "interval": interval, "limit": limit},
         )
 
+    def query_user_wallet_balance(self, quote_asset: str) -> list[dict[str, Any]]:
+        """Return Binance's quote-asset balance by wallet (Spot, Funding, Futures, etc.)."""
+        if not quote_asset:
+            raise ValueError("Quote asset is required")
+        return self._request(
+            "GET",
+            "/sapi/v1/asset/wallet/balance",
+            {"quoteAsset": quote_asset.upper()},
+            signed=True,
+        )
+
     def account(self) -> dict[str, Any]:
         return self._request("GET", "/api/v3/account", signed=True)
 
