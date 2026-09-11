@@ -133,8 +133,10 @@ def _update_short_position(position: ShortPosition, current: Decimal, current_si
         old_stop = Decimal(position.trailing_stop_price or (entry * (Decimal("1") - SHORT_TRAIL_LOCK_FRACTION)))
         position.trailing_stop_price = str(min(old_stop, trough * (Decimal("1") + SHORT_TRAIL_GAP_FRACTION)))
 
-    if position.trailing_active and current >= Decimal(position.trailing_stop_price):
-        return "trailing_stop"
+    if position.trailing_active:
+        trailing_stop = Decimal(position.trailing_stop_price or (entry * (Decimal("1") - SHORT_TRAIL_LOCK_FRACTION)))
+        if current >= trailing_stop:
+            return "trailing_stop"
 
     if not current_signal and current <= entry * (Decimal("1") - SHORT_SIGNAL_EXIT_MIN_PROFIT_FRACTION):
         return "signal_reversal"
