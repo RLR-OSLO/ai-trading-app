@@ -689,7 +689,7 @@ export default function TradingDashboard() {
           >
             {[1, 2, 3, 5, 10, 20].map((value) => <option key={value} value={value}>{value}x</option>)}
           </select>
-          <small>1–3x er normalt. 5–10x krever et svært sterkt signal. 20x er kun manuell ekstreminnstilling og brukes aldri automatisk.</small>
+          <small>Manuelt valg per bruker. Boten endrer aldri gearing. 5–10x krever et svært sterkt signal. 20x er kun manuell ekstreminnstilling.</small>
         </label>
       </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button><button className="secondary" onClick={() => void resetDailyLoss()} disabled={saving || !loaded}>Reset dagstap</button></div>{message && <p className="inline-message">{message}</p>}
     </section>
@@ -702,7 +702,7 @@ export default function TradingDashboard() {
         <div className={`setup-direction ${setup.direction.toLowerCase()}`}>{setup.direction}</div>
         <small>Modus: <b>{setup.mode}</b></small>
         <small>Aktuell score: <b>{setup.rawScore}</b> · Long {setup.longScore} / Short {setup.shortScore}</small>
-        {setup.direction === "SHORT" && settings.futures_enabled && <small className="leverage-suggestion">Botens forslag: <b>{setup.recommendedLeverage}x</b> {setup.recommendedLeverage >= 10 ? "kun ved ekstraordinært sterkt signal" : "konservativt nivå"}</small>}
+        {setup.direction === "SHORT" && settings.futures_enabled && <small className="leverage-suggestion">Mulig nivå – ikke aktivert: <b>{setup.recommendedLeverage}x</b> {setup.recommendedLeverage >= 10 ? "må velges manuelt" : "konservativt alternativ"}</small>}
         <Sparkline points={marketHistory[setup.symbol] ?? []} hours={historyHours} />
         <div className="setup-amount"><small>Beløp ({settings.quote_asset}) · forslag {money(setup.suggested)}</small><input type="number" min={5} max={Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc))} step="1" value={setupAmounts[setup.symbol] ?? setup.suggested.toFixed(2)} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setSetupAmounts((current) => ({ ...current, [setup.symbol]: event.target.value }))} /></div>
         {setup.direction !== "VENT" && (() => {
