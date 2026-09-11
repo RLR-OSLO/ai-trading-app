@@ -15,8 +15,8 @@ from .binance import BinanceError, BinanceSpotClient
 PROFILE_LIMITS = {
     "low": (6, 1800, 1),
     "normal": (12, 300, 3),
-    "high": (36, 90, 4),
-    "extreme": (100, 30, 5),
+    "high": (36, 90, 3),
+    "extreme": (100, 30, 3),
 }
 SCALP_STOP_FRACTION = Decimal("0.0060")
 SCALP_TARGET_FRACTION = Decimal("0.0080")
