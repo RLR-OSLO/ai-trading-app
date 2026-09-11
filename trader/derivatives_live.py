@@ -392,6 +392,6 @@ def run_short_cycle(
     target_fraction = max(configured_target, SHORT_MIN_TARGET_FRACTION)
     use_futures = bool(settings.get("futures_enabled")) and str(settings.get("risk_profile", "normal")) == "extreme"
     if use_futures:
-        leverage = max(1, min(2, int(settings.get("leverage", 1))))
+        leverage = max(1, min(20, int(settings.get("leverage", 1))))
         return _open_futures(credentials, symbol, notional, leverage, stop_fraction, target_fraction, state, state_path, report_trade)
     return _open_margin(credentials, symbol, notional, stop_fraction, target_fraction, state, state_path, report_trade)
