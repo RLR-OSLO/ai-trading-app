@@ -22,7 +22,7 @@ from .scalping import ScalpAnalysis, analyze_scalp
 
 LOG = logging.getLogger("ai_trader")
 RISK_THRESHOLDS = {"low": 7, "normal": 6, "high": 4, "extreme": 4}
-ACTIVE_MARKET_COUNT = 12
+ACTIVE_MARKET_COUNT = 5
 MIN_24H_QUOTE_VOLUME = Decimal(os.getenv("MIN_24H_QUOTE_VOLUME", "5000000"))
 MIN_24H_TRADES = int(os.getenv("MIN_24H_TRADES", "5000"))
 MAX_SPREAD_BPS = Decimal(os.getenv("MAX_SPREAD_BPS", "20"))
@@ -297,9 +297,13 @@ def market_scan(
         signals[pair] = bullrun_signal or scalp_signal or swing_signal
         strategies[pair] = "bullrun" if bullrun_signal else ("scalp" if scalp_signal else "swing")
         bearish = bearish_analyses[pair]
-        short_threshold = 7 if risk_profile == "high" else 6
+        # Shorts require stronger confirmation than longs and are only used
+        # when the broader BTC regime is not bullish. The short engine itself
+        # tracks one position at a time.
+        short_threshold = 7
         short_signals[pair] = (
             risk_profile in {"high", "extreme"}
+            and not btc_regime
             and bearish.score >= short_threshold
             and "short_risk_veto" not in bearish.reasons
             and not hard_news_block
