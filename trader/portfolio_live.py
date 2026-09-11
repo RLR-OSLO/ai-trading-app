@@ -258,16 +258,29 @@ def _position_limits(position: Position, limits: PortfolioLimits) -> tuple[Decim
 def _finalize_sell(state, path, position, quantity, received, limits, report_trade) -> str:
     if quantity <= 0 or received <= 0:
         raise BinanceError("Sell execution returned invalid quantity or proceeds")
-    pnl = received - Decimal(position.quote_spent)
+    position_quantity = Decimal(position.quantity)
+    sold_quantity = min(quantity, position_quantity)
+    if sold_quantity <= 0 or position_quantity <= 0:
+        raise BinanceError("Sell execution exceeded the tracked position")
+    cost_per_unit = Decimal(position.quote_spent) / position_quantity
+    cost_basis = cost_per_unit * sold_quantity
+    pnl = received - cost_basis
+    remaining_quantity = position_quantity - sold_quantity
+    if remaining_quantity <= Decimal("0.00000001"):
+        _remove(state, position.symbol)
+    else:
+        position.quantity = str(remaining_quantity)
+        position.quote_spent = str(cost_per_unit * remaining_quantity)
+        position.protective_order_list_id = None
+        position.protective_order_ids = ()
     state.realized_pnl = str(Decimal(state.realized_pnl) + pnl)
-    _remove(state, position.symbol)
     _clear_pending(state)
     state.trades_today += 1
     state.cooldown_until = int(time.time()) + limits.cooldown_seconds
     save_state(path, state)
     if report_trade:
-        report_trade({"symbol": position.symbol, "side": "SELL", "quantity": str(quantity),
-                      "entry_price": position.entry_price, "exit_price": str(received / quantity), "pnl": str(pnl)})
+        report_trade({"symbol": position.symbol, "side": "SELL", "quantity": str(sold_quantity),
+                      "entry_price": position.entry_price, "exit_price": str(received / sold_quantity), "pnl": str(pnl)})
     return f"sold:{position.symbol}:pnl={pnl};strategy={position.strategy}"
 
 
