@@ -427,7 +427,19 @@ def main() -> None:
                         analyses[pair].score,
                     ),
                 )
-                price_text = ",".join(f"{pair}:{client.ticker_price(pair)}" for pair in pairs)
+                # Store heartbeat prices for the full approved universe so the dashboard
+                # can draw history for every currency, not only the five currently scanned.
+                ticker_rows = client._request("GET", "/api/v3/ticker/price")
+                ticker_prices = {
+                    str(row.get("symbol")): str(row.get("price"))
+                    for row in ticker_rows
+                    if row.get("symbol") in {f"{asset}{quote_asset}" for asset in MARKET_UNIVERSE}
+                }
+                price_text = ",".join(
+                    f"{asset}{quote_asset}:{ticker_prices[f'{asset}{quote_asset}']}"
+                    for asset in MARKET_UNIVERSE
+                    if f"{asset}{quote_asset}" in ticker_prices
+                )
                 balances_text, spot_total, invested_value, wallet_value_text = binance_account_summary(client, quote_asset)
                 futures_total, futures_available = futures_wallet_summary(client.credentials, quote_asset)
                 account_total = spot_total + futures_total
