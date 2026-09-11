@@ -368,7 +368,7 @@ export default function TradingDashboard() {
       risk_profile: profile,
       short_enabled: profile === "high" || profile === "extreme",
       futures_enabled: profile === "extreme" ? current.futures_enabled : false,
-      leverage: profile === "extreme" ? Math.max(1, Math.min(2, Number(current.leverage || 1))) : 1,
+      leverage: profile === "extreme" ? Math.max(1, Math.min(20, Number(current.leverage || 1))) : 1,
       order_size_usdc: Math.min(Math.max(5, Number(current.trade_cap_usdc)), Math.max(5, roundedOrder)),
       stop_loss_percent: preset.stop_loss_percent,
       take_profit_percent: preset.take_profit_percent,
@@ -378,6 +378,8 @@ export default function TradingDashboard() {
   }
 
   async function save() {
+    const requestedLeverage = Number(settings.leverage || 1);
+    if (requestedLeverage > 3 && !window.confirm("Du har valgt høy futures-gearing. 10x/20x kan gi svært raske tap og likvidering. Bekreft at dette er et bevisst valg.")) return;
     setSaving(true); setMessage("");
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) { setSaving(false); return; }
@@ -389,7 +391,7 @@ export default function TradingDashboard() {
       max_daily_loss_usdc: Math.min(configuredCap, Math.max(0.5, Number(settings.max_daily_loss_usdc))),
       short_enabled: ["high", "extreme"].includes(settings.risk_profile) ? settings.short_enabled : false,
       futures_enabled: settings.risk_profile === "extreme" ? settings.futures_enabled : false,
-      leverage: settings.risk_profile === "extreme" ? Math.max(1, Math.min(2, Number(settings.leverage))) : 1,
+      leverage: settings.risk_profile === "extreme" ? Math.max(1, Math.min(20, Number(settings.leverage))) : 1,
       updated_at: new Date().toISOString(),
       user_id: userData.user.id
     };
@@ -643,8 +645,11 @@ export default function TradingDashboard() {
         <label className="number-field"><span>Tilgjengelig kapital ({settings.quote_asset})</span><input type="number" value={availableCapital} readOnly /></label>
         <Field label={`Maks botkapital (${settings.quote_asset})`} value={settings.trade_cap_usdc} min={5} step={5} onChange={(value) => update("trade_cap_usdc", value)} />
         <Field label={`Maks per posisjon (${settings.quote_asset})`} value={settings.order_size_usdc} min={5} max={Math.max(5, settings.trade_cap_usdc)} step={5} onChange={(value) => update("order_size_usdc", value)} />
-        <Field label="Stop-loss (%)" value={settings.stop_loss_percent} min={0.25} max={10} step={0.25} onChange={(value) => update("stop_loss_percent", value)} />
-        <Field label="Gevinstmål / shortmål (%)" value={settings.take_profit_percent} min={0.5} max={25} step={0.5} onChange={(value) => update("take_profit_percent", value)} />
+        <div className="automatic-risk-control">
+          <span>Stop-loss og gevinstsikring</span>
+          <strong>Styres automatisk av risikonivå</strong>
+          <small>Hard stop, trailing og gevinstsikring tilpasses markedssvingningene. Manuelle prosentfelt er fjernet for å unngå motstridende regler.</small>
+        </div>
         <Field label={`Maks dagstap (${settings.quote_asset})`} value={settings.max_daily_loss_usdc} min={0.5} max={Math.max(0.5, availableCapital)} step={0.5} onChange={(value) => update("max_daily_loss_usdc", value)} />
         <label className="select-field"><span>Risikonivå</span><select value={settings.risk_profile} onChange={(event) => applyRiskProfile(event.target.value as Settings["risk_profile"])}><option value="low">Lav</option><option value="normal">Normal</option><option value="high">Høy</option><option value="extreme">Ekstrem</option></select><small>Bytte av risikonivå setter automatisk nye standardverdier. Du kan deretter overstyre «Maks per investering» manuelt.</small></label>
 
@@ -674,14 +679,17 @@ export default function TradingDashboard() {
           <small>Kun Ekstrem risiko. Krever Binance Futures-rettighet.</small>
         </label>
 
-        <Field
-          label="Gearing"
-          value={settings.leverage}
-          min={1}
-          max={2}
-          step={1}
-          onChange={(value) => update("leverage", Math.max(1, Math.min(2, value)))}
-        />
+        <label className="select-field">
+          <span>Futures-gearing</span>
+          <select
+            value={settings.leverage}
+            disabled={settings.risk_profile !== "extreme" || !settings.futures_enabled}
+            onChange={(event) => update("leverage", Math.max(1, Math.min(20, Number(event.target.value))))}
+          >
+            {[1, 2, 3, 5, 10, 20].map((value) => <option key={value} value={value}>{value}x</option>)}
+          </select>
+          <small>1–3x er normalt. 5–10x krever et svært sterkt signal. 20x er kun manuell ekstreminnstilling og brukes aldri automatisk.</small>
+        </label>
       </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button><button className="secondary" onClick={() => void resetDailyLoss()} disabled={saving || !loaded}>Reset dagstap</button></div>{message && <p className="inline-message">{message}</p>}
     </section>
     <section className="panel best-setup-panel">
@@ -711,12 +719,12 @@ export default function TradingDashboard() {
         <span style={{ padding: "6px 10px", borderRadius: 999, background: "rgba(245,158,11,.13)", border: "1px solid rgba(245,158,11,.38)", fontSize: 12 }}>FUTURES SHORT · kan ha gearing</span>
       </div>
       <div className="assets">{allocations.map(({ asset, invested, quantity, pnl, currentPrice, currentValue, unrealized, owned, derivativeOpen, derivativeMode, derivativeQuantity, derivativeLeverage, derivativeEntryValue, derivativeCurrentValue, derivativeUnrealized }) => {
-        const derivativeStyle = derivativeOpen ? (derivativeMode === "futures"
-          ? { borderColor: "rgba(245,158,11,.65)", background: "rgba(245,158,11,.08)" }
-          : { borderColor: "rgba(168,85,247,.60)", background: "rgba(168,85,247,.08)" }) : undefined;
-        return <div className={`asset${owned ? " invested" : ""}`} style={derivativeStyle} key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b>{owned && <span className="owned-badge">SPOT</span>}{derivativeOpen && <span className="owned-badge" style={{ marginLeft: 6 }}>{derivativeMode === "futures" ? `SHORT · FUTURES · ${derivativeLeverage ?? 1}x` : "SHORT · MARGIN"}</span>}<small>Kjøpt for (Spot): {money(invested)} {settings.quote_asset} · Verdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`} · Eier: {crypto(quantity)} {asset}</small>{derivativeOpen && <small style={{ fontWeight: 700 }}>Short åpnet for: {money(derivativeEntryValue)} {settings.quote_asset} · Verdi nå: {money(derivativeCurrentValue)} {settings.quote_asset} · {derivativeMode === "futures" ? `Futures ${derivativeLeverage ?? 1}x` : "Margin/lån"} · Urealisert: {derivativeUnrealized === null ? "–" : `${derivativeUnrealized >= 0 ? "+" : ""}${money(derivativeUnrealized)} ${settings.quote_asset}`}</small>}<small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`}</small><Sparkline points={marketHistory[`${asset}${settings.quote_asset}`] ?? []} hours={historyHours} /></div><span className={(unrealized ?? pnl) < 0 ? "loss" : "gain"}>{unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>;
+        const resultValue = unrealized ?? pnl;
+        const spotStatus = resultValue > 0.00000001 ? "spot-gain" : resultValue < -0.00000001 ? "spot-loss" : "spot-neutral";
+        const positionClass = derivativeOpen ? `derivative-${derivativeMode}` : spotStatus;
+        return <div className={`asset ${owned ? "invested " : ""}${positionClass}`} key={asset}><span className="coin">{asset[0]}</span><div><b>{asset}/{settings.quote_asset}</b>{owned && <span className="owned-badge spot-badge">SPOT</span>}{derivativeOpen && <span className={`owned-badge ${derivativeMode === "futures" ? "futures-badge" : "margin-badge"}`}>{derivativeMode === "futures" ? `SHORT · FUTURES · ${derivativeLeverage ?? 1}x` : "SHORT · MARGIN"}</span>}<small>Kjøpt for (Spot): {money(invested)} {settings.quote_asset} · Verdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`} · Eier: {crypto(quantity)} {asset}</small>{derivativeOpen && <small style={{ fontWeight: 700 }}>Short åpnet for: {money(derivativeEntryValue)} {settings.quote_asset} · Verdi nå: {money(derivativeCurrentValue)} {settings.quote_asset} · {derivativeMode === "futures" ? `Futures ${derivativeLeverage ?? 1}x` : "Margin/lån"} · Urealisert: {derivativeUnrealized === null ? "–" : `${derivativeUnrealized >= 0 ? "+" : ""}${money(derivativeUnrealized)} ${settings.quote_asset}`}</small>}<small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`}</small><Sparkline points={marketHistory[`${asset}${settings.quote_asset}`] ?? []} hours={historyHours} /></div><span className={resultValue < 0 ? "loss" : "gain"}>{unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>;
       })}</div>
-      <p className="muted" style={{ marginTop: 12, marginBottom: 0 }}>Farget markering betyr at denne valutaen har en åpen short-/derivatposisjon i tillegg til eventuell spotbeholdning. Lilla = Margin-short. Oransje = Futures-short; badge viser gearingen som ble brukt ved åpning.</p>
+      <p className="muted" style={{ marginTop: 12, marginBottom: 0 }}>Grønn = spot i pluss. Rød = spot i minus. Lilla = Margin-short. Oransje = Futures-short. Nøytral = ingen aktiv beholdning eller manglende prisgrunnlag.</p>
     </section>
     <section className="panel trade-history-panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><div className="trade-head-actions"><span className="muted">Oppdateres hvert 30. sekund</span><button type="button" className="secondary compact" onClick={() => void downloadTradesCsv()}>Last ned CSV</button></div></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list"><div className="trade-row trade-header"><span>Handel</span><span>Antall</span><span>Inngang</span><span>Utgang</span><span>Resultat</span><span>Tid</span></div>{trades.slice(0, 20).map((trade) => { const derivative = trade.mode === "margin" || trade.mode === "futures"; const modeClass = trade.mode === "futures" ? "trade-futures" : trade.mode === "margin" ? "trade-margin" : "trade-spot"; const label = trade.mode === "futures" ? `SHORT · FUTURES · ${Number(trade.leverage ?? 1)}x` : trade.mode === "margin" ? "SHORT · MARGIN" : "SPOT"; return <div className={`trade-row ${modeClass}`} key={trade.id}><div><span className={`trade-mode-badge ${modeClass}`}>{label}</span><b>{trade.side} {trade.symbol}</b><small>{derivative ? (trade.side === "SELL" ? "Åpnet short-posisjon" : "Lukket short-posisjon") : (trade.side === "BUY" ? "Kjøpt spot" : "Solgt spot")}</small></div><span>{Number(trade.quantity).toPrecision(6)}</span><span>{trade.entry_price == null ? "–" : money(Number(trade.entry_price))}</span><span>{trade.exit_price == null ? "ÅPEN" : money(Number(trade.exit_price))}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{trade.pnl == null ? "–" : `${Number(trade.pnl) >= 0 ? "+" : ""}${money(Number(trade.pnl))} ${settings.quote_asset}`}</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>; })}</div>}</section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">SERVERSTATUS</p><h3>Siste kontrollsignal</h3></div><div className="server-signal-actions">{lastEvent && <time className="muted">{new Date(lastEvent.created_at).toLocaleString("nb-NO")}</time>}<button type="button" className="secondary compact" onClick={() => setServerSignalExpanded((value) => !value)}>{serverSignalExpanded ? "Skjul" : "Utvid"}</button></div></div><p className={`server-signal ${serverSignalExpanded ? "expanded" : "collapsed"} ${lastEvent?.level === "error" ? "loss" : "muted"}`}>{lastEvent?.message ?? "Serverrapportering er ikke koblet til ennå."}</p></section>
