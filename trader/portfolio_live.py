@@ -26,8 +26,11 @@ TRAILING_REFRESH_FRACTION = Decimal("0.001")
 TRAILING_GAP_RATIO = Decimal("0.45")
 TRAILING_MIN_GAP_FRACTION = Decimal("0.0025")
 SCALP_TIMEOUT_PROFIT_FRACTION = Decimal("0.0040")
-SCALP_TIMEOUT_MAX_LOSS_FRACTION = Decimal("0.0030")
 SCALP_BREAKEVEN_LOCK_FRACTION = Decimal("0.0035")
+PROFIT_GUARD_ACTIVATION = Decimal("0.0060")
+PROFIT_GUARD_LOCK = Decimal("0.0035")
+LOSS_REENTRY_SECONDS = 900  # Three closed 5-minute candles after a losing exit.
+EXIT_REENTRY_SECONDS = 300
 
 
 @dataclass
@@ -62,10 +65,13 @@ class PortfolioState:
     pending_stop_fraction: str | None = None
     pending_target_fraction: str | None = None
     pending_max_hold_seconds: int | None = None
+    reentry_blocks: dict[str, dict[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         if self.positions is None:
             self.positions = []
+        if self.reentry_blocks is None:
+            self.reentry_blocks = {}
 
 
 @dataclass(frozen=True)
@@ -173,6 +179,7 @@ def load_state(path: Path) -> PortfolioState:
         str(raw.get("pending_strategy") or "swing"), raw.get("pending_stop_fraction"),
         raw.get("pending_target_fraction"),
         int(raw["pending_max_hold_seconds"]) if raw.get("pending_max_hold_seconds") is not None else None,
+        raw.get("reentry_blocks", {}),
     )
     if state.day != _today():
         state.day, state.realized_pnl, state.trades_today = _today(), "0", 0
@@ -277,6 +284,10 @@ def _finalize_sell(state, path, position, quantity, received, limits, report_tra
     _clear_pending(state)
     state.trades_today += 1
     state.cooldown_until = int(time.time()) + limits.cooldown_seconds
+    state.reentry_blocks[position.symbol] = {
+        "until": int(time.time()) + (LOSS_REENTRY_SECONDS if pnl < 0 else EXIT_REENTRY_SECONDS),
+        "signal_reset": False,
+    }
     save_state(path, state)
     if report_trade:
         report_trade({"symbol": position.symbol, "side": "SELL", "quantity": str(sold_quantity),
@@ -565,6 +576,14 @@ def run_portfolio_cycle(
     if reconciled:
         return reconciled
 
+    # A missing symbol in a rotating universe is not a fresh negative signal.
+    for symbol, block in list(state.reentry_blocks.items()):
+        if symbol in signals and not signals[symbol]:
+            block["signal_reset"] = True
+        if now >= block["until"] and block["signal_reset"]:
+            del state.reentry_blocks[symbol]
+    save_state(state_path, state)
+
     notes: list[str] = []
     for position in list(state.positions or []):
         if not _protection_enabled() and (position.protective_order_list_id is not None or position.protective_order_ids):
@@ -587,29 +606,33 @@ def run_portfolio_cycle(
         activation = entry * (Decimal("1") + activation_fraction)
         trailing_gap = max(TRAILING_MIN_GAP_FRACTION, stop_fraction * TRAILING_GAP_RATIO)
         peak = Decimal(position.peak_price) if position.peak_price is not None else entry
+        peak = max(peak, current)
+        # Track favourable prices before the full trend trail activates too.
+        previous_peak = Decimal(position.peak_price or position.entry_price)
+        cost_per_unit = Decimal(position.quote_spent) / Decimal(position.quantity)
+        profit_floor = max(entry, cost_per_unit) * (Decimal("1") + PROFIT_GUARD_LOCK)
+        if peak >= max(entry, cost_per_unit) * (Decimal("1") + PROFIT_GUARD_ACTIVATION):
+            if current <= profit_floor:
+                if not _cancel_protection(client, state, state_path, position):
+                    notes.append(f"profit_guard_cancel_failed:{position.symbol}")
+                    continue
+                return _market_sell(client, state, state_path, position, limits, report_trade, now, "profit_guard")
+        if peak > previous_peak and not position.trailing_active:
+            position.peak_price = str(peak)
+            save_state(state_path, state)
 
         if position.strategy == "scalp" and position.max_hold_seconds is not None:
             age = now - position.opened_at
-            if age >= position.max_hold_seconds and current >= entry * (Decimal("1") + SCALP_TIMEOUT_PROFIT_FRACTION):
+            if age >= position.max_hold_seconds and current >= max(entry, cost_per_unit) * (Decimal("1") + SCALP_TIMEOUT_PROFIT_FRACTION):
                 if position.protective_order_list_id is not None and not _cancel_protection(client, state, state_path, position):
                     notes.append(f"scalp_profit_timeout_cancel_failed:{position.symbol}")
                     continue
                 return _market_sell(client, state, state_path, position, limits, report_trade, now, "timeout_profit")
-            # Do not force-sell a scalp at a material loss just because a timer expired.
-            # Time exit is allowed only after the entry signal has disappeared and the
-            # position is close to flat. A genuinely bad trade is still bounded by the
-            # hard stop below. This prevents repeated small timer-driven losses.
-            if (
-                age >= position.max_hold_seconds * 2
-                and not signals.get(position.symbol, False)
-                and current >= entry * (Decimal("1") - SCALP_TIMEOUT_MAX_LOSS_FRACTION)
-            ):
-                if position.protective_order_list_id is not None and not _cancel_protection(client, state, state_path, position):
-                    notes.append(f"scalp_signal_timeout_cancel_failed:{position.symbol}")
-                    continue
-                return _market_sell(client, state, state_path, position, limits, report_trade, now, "signal_timeout")
+            # A timer alone must not realize a loss. Hard stops remain authoritative.
 
         if not position.trailing_active and current >= activation:
+            if current <= profit_floor:
+                continue
             if position.protective_order_list_id is not None and not _cancel_protection(client, state, state_path, position):
                 notes.append(f"trailing_activation_cancel_failed:{position.symbol}")
                 continue
@@ -617,8 +640,8 @@ def run_portfolio_cycle(
             peak = max(peak, current)
             position.peak_price = str(peak)
             trailing_stop = peak * (Decimal("1") - trailing_gap)
-            if position.strategy == "scalp":
-                trailing_stop = max(trailing_stop, entry * (Decimal("1") + SCALP_BREAKEVEN_LOCK_FRACTION))
+            # Never arm a profit trail below its cost-aware floor or at/above market.
+            trailing_stop = max(trailing_stop, profit_floor)
             position.trailing_stop_price = str(trailing_stop)
             save_state(state_path, state)
             if _protection_enabled():
@@ -632,11 +655,10 @@ def run_portfolio_cycle(
 
         if position.trailing_active:
             old_stop = Decimal(position.trailing_stop_price) if position.trailing_stop_price else peak * (Decimal("1") - trailing_gap)
-            if current > peak:
+            if current > previous_peak:
                 new_peak = current
                 new_stop = new_peak * (Decimal("1") - trailing_gap)
-                if position.strategy == "scalp":
-                    new_stop = max(new_stop, entry * (Decimal("1") + SCALP_BREAKEVEN_LOCK_FRACTION))
+                new_stop = max(new_stop, old_stop, profit_floor)
                 position.peak_price = str(new_peak)
                 position.trailing_stop_price = str(new_stop)
                 save_state(state_path, state)
@@ -689,7 +711,8 @@ def run_portfolio_cycle(
         return "cooldown"
 
     open_symbols = {p.symbol for p in state.positions or []}
-    candidates = [symbol for symbol, active in signals.items() if active and symbol not in open_symbols]
+    candidates = [symbol for symbol, active in signals.items()
+                  if active and symbol not in open_symbols and symbol not in state.reentry_blocks]
     if not candidates:
         return ";".join(notes) if notes else "no_signal"
     free_quote = _free_balance(client, quote)

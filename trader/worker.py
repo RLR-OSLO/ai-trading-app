@@ -319,9 +319,14 @@ def market_scan(
         swing_signal = (
             analyses[pair].score >= effective_swing_threshold
             and "risk_veto" not in analyses[pair].reasons
+            and {"15m_trend", "1h_trend"}.issubset(analyses[pair].reasons)
             and not hard_news_block
         )
-        scalp_signal = scalp_enabled and scalp_analyses[pair].signal and not hard_news_block
+        scalp_signal = (
+            scalp_enabled and scalp_analyses[pair].signal and not hard_news_block
+            and "15m_trend" in analyses[pair].reasons
+            and "risk_veto" not in analyses[pair].reasons
+        )
         bullrun_signal = bullruns[pair] and not hard_news_block
         signals[pair] = bullrun_signal or scalp_signal or swing_signal
         strategies[pair] = "bullrun" if bullrun_signal else ("scalp" if scalp_signal else "swing")
@@ -474,7 +479,7 @@ def main() -> None:
                 account_total = spot_total + futures_total
                 reporter.record_event(
                     "heartbeat",
-                    f"live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
+                    f"engine=exit-guard-v3;live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
                     f"signals={signal_text};scores={score_text};scalp_scores={scalp_score_text};short_scores={short_score_text};"
                     f"prices={price_text};balances={balances_text};wallet_values={wallet_value_text};wallets={wallet_breakdown_text};account_total={account_total};spot_total={spot_total};spot_available={available_balance};futures_total={futures_total};futures_available={futures_available};invested_value={invested_value};markets={','.join(pairs)};"
                     f"best={best_pair}:{strategies[best_pair]}:{analyses[best_pair].score}/{scalp_analyses[best_pair].score};"
@@ -544,6 +549,8 @@ def main() -> None:
                 LOG.info("new entries paused; no open position requires management")
             else:
                 LOG.warning("live cycle result=%s", result)
+            if reporter and result.startswith(("sold:", "bought:")):
+                reporter.record_event("spot_execution", result)
 
             if client.credentials is not None and settings is not None:
                 spot_state = load_state(state_path)
@@ -570,6 +577,8 @@ def main() -> None:
                     directive = None
                 if short_result not in {"short_disabled", "no_short_signal", "short_new_entries_paused"}:
                     LOG.warning("derivatives cycle result=%s", short_result)
+                if reporter and ("_closed" in short_result or "_opened:" in short_result):
+                    reporter.record_event("short_execution", short_result)
         except Exception as exc:
             LOG.exception("trading cycle failed; no new order will be submitted")
             if reporter:

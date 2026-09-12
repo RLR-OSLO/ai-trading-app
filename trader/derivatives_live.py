@@ -47,6 +47,7 @@ class DerivativesState:
     realized_pnl: str = "0"
     trades_today: int = 0
     position: ShortPosition | None = None
+    cooldown_until: int = 0
 
 
 def _today() -> str:
@@ -63,6 +64,7 @@ def load_state(path: Path) -> DerivativesState:
         realized_pnl=str(raw.get("realized_pnl", "0")),
         trades_today=int(raw.get("trades_today", 0)),
         position=ShortPosition(**pos) if pos else None,
+        cooldown_until=int(raw.get("cooldown_until", 0)),
     )
     if state.day != _today():
         state.day = _today()
@@ -180,6 +182,7 @@ def _close_margin(
     state.realized_pnl = str(Decimal(state.realized_pnl) + pnl)
     state.trades_today += 1
     state.position = None
+    state.cooldown_until = int(time.time()) + 300
     save_state(path, state)
     _record(report_trade, {"mode": "margin", "symbol": position.symbol, "side": "BUY", "quantity": str(executed), "entry_price": position.entry_price, "exit_price": str(spent / executed), "pnl": str(pnl), "leverage": 1})
     return f"margin_short_closed:{position.symbol}:pnl={pnl};reason={reason}"
@@ -262,6 +265,7 @@ def _close_futures(
     state.realized_pnl = str(Decimal(state.realized_pnl) + pnl)
     state.trades_today += 1
     state.position = None
+    state.cooldown_until = int(time.time()) + 300
     save_state(path, state)
     _record(report_trade, {"mode": "futures", "symbol": position.symbol, "side": "BUY", "quantity": str(qty), "entry_price": position.entry_price, "exit_price": str(exit_price), "pnl": str(pnl), "leverage": position.leverage})
     return f"futures_short_closed:{position.symbol}:pnl={pnl};reason={reason}"
@@ -338,6 +342,7 @@ def run_short_cycle(
             amount = sum((abs(Decimal(str(x.get("positionAmt", "0")))) for x in exchange_positions), Decimal("0"))
             if amount == 0:
                 state.position = None
+                state.cooldown_until = int(time.time()) + 300
                 save_state(state_path, state)
                 return f"futures_short_closed_exchange:{position.symbol}"
             current = client.ticker_price(position.symbol)
@@ -352,6 +357,7 @@ def run_short_cycle(
                 order_list = client.query_order_list(order_list_id=position.protection_ids[0])
                 if str(order_list.get("listOrderStatus", "")) != "EXECUTING":
                     state.position = None
+                    state.cooldown_until = int(time.time()) + 300
                     save_state(state_path, state)
                     return f"margin_short_closed_exchange:{position.symbol}"
             except BinanceError:
@@ -367,6 +373,8 @@ def run_short_cycle(
         return "short_new_entries_paused"
     if not bool(settings.get("short_enabled")):
         return "short_disabled"
+    if int(time.time()) < state.cooldown_until:
+        return "short_cooldown"
 
     candidates = [symbol for symbol, active in short_signals.items() if active]
     if not candidates:
@@ -391,7 +399,15 @@ def run_short_cycle(
     stop_fraction = max(configured_stop, SHORT_MIN_STOP_FRACTION)
     target_fraction = max(configured_target, SHORT_MIN_TARGET_FRACTION)
     use_futures = bool(settings.get("futures_enabled")) and str(settings.get("risk_profile", "normal")) == "extreme"
-    if use_futures:
-        leverage = max(1, min(20, int(settings.get("leverage", 1))))
-        return _open_futures(credentials, symbol, notional, leverage, stop_fraction, target_fraction, state, state_path, report_trade)
-    return _open_margin(credentials, symbol, notional, stop_fraction, target_fraction, state, state_path, report_trade)
+    try:
+        if use_futures:
+            leverage = max(1, min(20, int(settings.get("leverage", 1))))
+            return _open_futures(credentials, symbol, notional, leverage, stop_fraction, target_fraction, state, state_path, report_trade)
+        return _open_margin(credentials, symbol, notional, stop_fraction, target_fraction, state, state_path, report_trade)
+    except BinanceError:
+        # Reload because a failed protection install may have already closed the
+        # position. Avoid another open/failed-protection/close on the next scan.
+        latest = load_state(state_path)
+        latest.cooldown_until = int(time.time()) + 300
+        save_state(state_path, latest)
+        raise

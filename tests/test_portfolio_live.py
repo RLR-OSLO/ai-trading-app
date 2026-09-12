@@ -208,7 +208,7 @@ class PortfolioLiveTests(unittest.TestCase):
         self.assertEqual(len(final.positions), 1)
         self.assertIn("holding:BTCUSDC", result)
 
-    def test_expired_scalp_can_exit_small_loss_after_signal_disappears(self):
+    def test_expired_scalp_does_not_exit_small_loss_on_timer_alone(self):
         client = FakeClient()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
@@ -225,8 +225,8 @@ class PortfolioLiveTests(unittest.TestCase):
             save_state(path, state)
             client.price = Decimal("99.80")
             result = run_portfolio_cycle(client, {"BTCUSDC": False}, path, self.limits())
-        self.assertIn("reason=signal_timeout", result)
-        self.assertEqual(client.live_sells, 1)
+        self.assertIn("holding:BTCUSDC", result)
+        self.assertEqual(client.live_sells, 0)
 
     def test_high_profile_is_aggressive_but_bounded(self):
         limits = PortfolioLimits.from_settings({
