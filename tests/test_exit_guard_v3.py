@@ -116,10 +116,25 @@ def test_failed_short_open_is_not_retried_next_cycle(tmp_path):
     path = tmp_path / 'short.json'
     settings = {'short_enabled': True, 'futures_enabled': True, 'risk_profile': 'extreme'}
     with patch.object(shorts, '_open_futures', side_effect=BinanceError('Margin is insufficient.')) as opening:
-        with pytest.raises(BinanceError):
-            shorts.run_short_cycle(None, {'BTCUSDC': True}, {}, settings, path)
+        result = shorts.run_short_cycle(None, {'BTCUSDC': True}, {}, settings, path)
+        assert result == 'short_open_rejected:BTCUSDC:Margin is insufficient.'
         assert shorts.run_short_cycle(None, {'BTCUSDC': True}, {}, settings, path) == 'short_cooldown'
         assert opening.call_count == 1
+
+
+def test_failed_short_open_still_raises_if_position_remains(tmp_path):
+    path = tmp_path / 'short.json'
+    settings = {'short_enabled': True, 'futures_enabled': True, 'risk_profile': 'extreme'}
+
+    def fail_after_saving(*args):
+        state = args[6]
+        state.position = shorts.ShortPosition('futures', 'BTCUSDC', '.001', '100', '.1', 1, '.015', '.03')
+        shorts.save_state(path, state)
+        raise BinanceError('Protection failed.')
+
+    with patch.object(shorts, '_open_futures', side_effect=fail_after_saving):
+        with pytest.raises(BinanceError, match='Protection failed'):
+            shorts.run_short_cycle(None, {'BTCUSDC': True}, {}, settings, path)
 
 
 def test_short_cooldown_does_not_skip_management_of_existing_position(tmp_path):

@@ -404,10 +404,15 @@ def run_short_cycle(
             leverage = max(1, min(20, int(settings.get("leverage", 1))))
             return _open_futures(credentials, symbol, notional, leverage, stop_fraction, target_fraction, state, state_path, report_trade)
         return _open_margin(credentials, symbol, notional, stop_fraction, target_fraction, state, state_path, report_trade)
-    except BinanceError:
+    except BinanceError as exc:
         # Reload because a failed protection install may have already closed the
         # position. Avoid another open/failed-protection/close on the next scan.
         latest = load_state(state_path)
         latest.cooldown_until = int(time.time()) + 300
         save_state(state_path, latest)
-        raise
+        # Entry rejections (for example insufficient futures margin) are an
+        # expected exchange response, not a failure of the entire trading
+        # cycle. Keep surfacing errors if an unprotected position remains.
+        if latest.position is not None:
+            raise
+        return f"short_open_rejected:{symbol}:{exc}"
