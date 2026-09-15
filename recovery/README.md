@@ -51,3 +51,44 @@ the existing process continues running, not as an atomic account checkpoint.
 Validation: transactional SQL tests check ownership, anonymous denial, blocked
 client writes, disabled trading defaults and service-only uploads. Python tests
 check allowed read paths, pagination and separation of other users' state.
+
+## API and server reconnection update
+
+`20260915091011_restore_compass_trading_apis.sql` restores exchange setup/status,
+encrypted per-user Vault credentials and service-only account retrieval. Financial
+API reads require MFA; settings/directives additionally require completed account
+recovery. The server execution flag cannot be supplied by clients: the database
+sets it only when a recovered, MFA-verified account explicitly enables trading.
+The owner keeps existing server-env keys and state paths. Vault and server-env
+connections are kept distinct so the manager cannot start the owner on an empty
+new per-user state path.
+
+The server now supports modern Supabase secret keys. Until execution is explicitly
+authorized, it sends heartbeats but performs no state resets/recovery, directives,
+Spot or derivative execution. Existing stop-loss/trailing execution is also
+inactive during this initial reporting-only stage. After a deliberate first
+activation, the preexisting pause semantics still allow management of open positions.
+
+The frontend adds Authenticator enrollment/challenge, encrypted reconnection for
+approved users and a separate Binance fills history. Original position costs seed
+the portfolio calculation; these snapshots are not fabricated BUY trades. New bot
+P&L is explicitly labeled as post-recovery.
+
+Run `connect_server.py` from the verified revision with `--backup <root backup>
+--revision <commit> --user-id <verified Google user UUID> --email <verified email>`.
+It reuses the saved Compass key, verifies the Google identity, checks fresh Spot
+holdings, collects Margin/Futures evidence and installs code into a new root-owned
+`/opt/ai-trading-compass-*` directory. A systemd drop-in selects that code. Original
+code stays in `/opt/ai-trading-app`; future deploys must update/remove the Compass
+drop-in deliberately instead of assuming the original directory is active.
+
+The active env is copied before replacement. State is copied after stopping the
+old service and compared byte-for-byte after the new reporting-only heartbeat.
+Startup/verification failures restore the previous env and remove this drop-in;
+state files are never overwritten during rollback. On success, the connection
+report is uploaded. Recovery completion remains an operator action after reviewing
+the current exchange evidence. No trading has been enabled by these migrations.
+
+Validation: TypeScript and production build; 13 Python checks across recovery,
+reporting and isolation; transactional SQL checks for MFA, encrypted credentials,
+service RPC isolation, explicit activation and owner-only recovered fills/positions.

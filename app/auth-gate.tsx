@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { isCompassInternalAuth, supabase } from "../lib/supabase";
 import ExchangeOnboarding from "./exchange-onboarding";
+import MfaGate from "./mfa-gate";
 
 type GateState = "loading" | "signed-out" | "pending" | "rejected" | "recovery" | "ready" | "error";
 
@@ -10,6 +11,7 @@ export default function AuthGate({ children }: Readonly<{ children: React.ReactN
   const [state, setState] = useState<GateState>("loading");
   const [message, setMessage] = useState("");
   const [email, setEmail] = useState("");
+  const [reconnect, setReconnect] = useState(false);
 
   const refresh = useCallback(async () => {
     setState("loading");
@@ -94,7 +96,12 @@ export default function AuthGate({ children }: Readonly<{ children: React.ReactN
     setState("signed-out");
   }
 
-  if (state === "ready") return <ExchangeOnboarding>{children}</ExchangeOnboarding>;
+  if (state === "ready") return isCompassInternalAuth
+    ? <MfaGate><ExchangeOnboarding>{children}</ExchangeOnboarding></MfaGate>
+    : <ExchangeOnboarding>{children}</ExchangeOnboarding>;
+  if (state === "recovery" && reconnect) return <MfaGate><ExchangeOnboarding>
+    <main className="gate-shell"><section className="gate-card"><h1>Binance-kobling lagret</h1><p>Serveren må kontrollere kontoen før dashboardet åpnes. Handel er fortsatt avslått.</p><button className="primary" onClick={() => { setReconnect(false); void refresh(); }}>Sjekk status</button></section></main>
+  </ExchangeOnboarding></MfaGate>;
 
   return <main className="gate-shell"><section className="gate-card">
     <p className="eyebrow">AI TRADING APP</p>
@@ -103,6 +110,7 @@ export default function AuthGate({ children }: Readonly<{ children: React.ReactN
       <p className="muted">Tilgangen til {email || "Google-kontoen din"} er bekreftet.</p>
       <p className="muted">Tidligere handelsdata og Binance-kobling må gjenopprettes før dashboardet kan åpnes. Innloggingen starter ingen nye handler.</p>
       <div className="gate-actions"><button className="secondary" onClick={() => void signOut()}>Logg ut</button><button className="primary" onClick={() => void refresh()}>Sjekk igjen</button></div>
+      <button className="secondary" style={{ marginTop: 12 }} onClick={() => setReconnect(true)}>Koble Binance på nytt</button>
     </> : state === "pending" ? <>
       <h1>Venter på godkjenning</h1>
       <p className="muted">{email || "Denne Google-kontoen"} er registrert. Administrator må godkjenne brukeren før Binance-oppsett og trading blir tilgjengelig.</p>
