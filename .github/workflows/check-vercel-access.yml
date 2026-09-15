@@ -45,7 +45,11 @@ jobs:
           for key, expected in values.items():
               row = next((r for r in rows if r.get("key") == key and r.get("gitBranch") == branch), None)
               assert row is not None, f"Missing preview variable: {key}"
-              assert row.get("value") == expected, f"Incorrect preview value: {key}"
+              read_url = f"https://api.vercel.com/v1/projects/{project}/env/{row['id']}?" + urllib.parse.urlencode({"teamId": team})
+              request = urllib.request.Request(read_url, headers={"Authorization": f"Bearer {token}"})
+              with urllib.request.urlopen(request, timeout=25) as response:
+                  decrypted = json.load(response)
+              assert decrypted.get("value") == expected, f"Incorrect preview value: {key}"
               assert row.get("target") == ["preview"], "Unexpected environment target"
               print("PREVIEW_AUTH_VERIFIED", key)
           print("PRODUCTION_CONFIGURATION_UNCHANGED")
