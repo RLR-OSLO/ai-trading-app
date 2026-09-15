@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabase } from "../lib/supabase";
+import { isCompassInternalAuth, supabase } from "../lib/supabase";
 import ExchangeOnboarding from "./exchange-onboarding";
 
-type GateState = "loading" | "signed-out" | "pending" | "rejected" | "ready" | "error";
+type GateState = "loading" | "signed-out" | "pending" | "rejected" | "recovery" | "ready" | "error";
 
 export default function AuthGate({ children }: Readonly<{ children: React.ReactNode }>) {
   const [state, setState] = useState<GateState>("loading");
@@ -27,6 +27,38 @@ export default function AuthGate({ children }: Readonly<{ children: React.ReactN
     }
 
     setEmail(session.user.email ?? "");
+    if (isCompassInternalAuth) {
+      // RLS exposes this app only to explicitly approved members. A Google
+      // account in the shared project alone does not grant trading access.
+      const { data: app, error: membershipError } = await supabase
+        .from("internal_apps")
+        .select("id")
+        .eq("slug", "ai-trading-app")
+        .maybeSingle();
+      if (membershipError) {
+        setMessage(membershipError.message);
+        setState("error");
+        return;
+      }
+      if (!app) {
+        setState("pending");
+        return;
+      }
+      const { data: recovery, error: recoveryError } = await supabase
+        .from("trading_account_recovery")
+        .select("completed_at")
+        .eq("user_id", session.user.id)
+        .maybeSingle();
+      if (recoveryError) {
+        setMessage(recoveryError.message);
+        setState("error");
+        return;
+      }
+      // Only an operator can mark recovery complete after restoring the old
+      // account data, exchange credentials, MFA and worker identity mapping.
+      setState(recovery?.completed_at ? "ready" : "recovery");
+      return;
+    }
     const { data: access, error: accessError } = await supabase
       .from("user_access")
       .select("approved,rejected")
@@ -66,7 +98,12 @@ export default function AuthGate({ children }: Readonly<{ children: React.ReactN
 
   return <main className="gate-shell"><section className="gate-card">
     <p className="eyebrow">AI TRADING APP</p>
-    {state === "pending" ? <>
+    {state === "recovery" ? <>
+      <h1>Innlogget</h1>
+      <p className="muted">Tilgangen til {email || "Google-kontoen din"} er bekreftet.</p>
+      <p className="muted">Tidligere handelsdata og Binance-kobling må gjenopprettes før dashboardet kan åpnes. Innloggingen starter ingen nye handler.</p>
+      <div className="gate-actions"><button className="secondary" onClick={() => void signOut()}>Logg ut</button><button className="primary" onClick={() => void refresh()}>Sjekk igjen</button></div>
+    </> : state === "pending" ? <>
       <h1>Venter på godkjenning</h1>
       <p className="muted">{email || "Denne Google-kontoen"} er registrert. Administrator må godkjenne brukeren før Binance-oppsett og trading blir tilgjengelig.</p>
       <div className="gate-actions"><button className="secondary" onClick={() => void signOut()}>Logg ut</button><button className="primary" onClick={() => void refresh()}>Sjekk igjen</button></div>
