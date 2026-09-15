@@ -8,3 +8,6 @@ if (!url || !publishableKey) {
 }
 
 export const supabase = createClient(url, publishableKey);
+
+export const isCompassInternalAuth =
+  new URL(url).hostname === "nsqsqupucxgrkwotegof.supabase.co";
