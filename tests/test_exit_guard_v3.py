@@ -98,7 +98,7 @@ def test_negative_signal_does_not_shorten_loss_pause(tmp_path):
     (('15m_trend', '1h_trend'), True),
 ])
 def test_scalp_cannot_bypass_higher_timeframe_risk_veto(reasons, expected):
-    analysis = SimpleNamespace(score=7, reasons=reasons, volume_ratio_15m=D('1.2'))
+    analysis = SimpleNamespace(score=7, reasons=reasons, volume_ratio_15m=D('1.2'), rsi_1h=D('55'), atr_percent_1h=D('1'))
     scalp = SimpleNamespace(signal=True, score=7)
     bearish = SimpleNamespace(score=1, reasons=())
     client = SimpleNamespace(klines=lambda *a, **k: [[], []])

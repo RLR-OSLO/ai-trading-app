@@ -264,6 +264,7 @@ def market_scan(
     news_monitor: NewsMonitor,
     pairs: tuple[str, ...],
     risk_profile: str,
+    veto_overrides: dict[str, object] | None = None,
 ) -> tuple[
     dict[str, bool],
     dict[str, MarketAnalysis],
@@ -283,7 +284,7 @@ def market_scan(
     btc_pair = next((pair for pair in pairs if pair.startswith("BTC")), pairs[0])
     btc_regime = bullish_btc_regime(swing_frames[btc_pair])
     news = news_monitor.score()
-    analyses = {pair: analyze_market(data) for pair, data in swing_frames.items()}
+    analyses = {pair: analyze_market(data, veto_overrides) for pair, data in swing_frames.items()}
     bearish_analyses = {pair: analyze_bearish_market(data) for pair, data in swing_frames.items()}
     aggressive_scalping = risk_profile in {"high", "extreme"}
     scalp_analyses = {
@@ -349,7 +350,10 @@ def market_scan(
     short_text = ",".join(pair for pair in ranked if short_signals[pair]) or "none"
     context = (
         f"threshold={effective_swing_threshold};base_threshold={swing_threshold};risk={risk_profile};btc_regime={btc_regime};"
-        f"news={news.score:.2f};news_penalty={news_penalty};headlines={news.fresh_headlines};scalp={scalp_signal_text};bullrun={bullrun_text};shorts={short_text}"
+        f"news={news.score:.2f};news_penalty={news_penalty};headlines={news.fresh_headlines};scalp={scalp_signal_text};bullrun={bullrun_text};shorts={short_text};"
+        "veto_controls=v1;"
+        + "veto_ignored=" + (",".join(name for name in ("rsi_high", "rsi_low", "atr") if (veto_overrides or {}).get("ignore_" + name + "_veto") is True) or "none") + ";"
+        + "indicators=" + ",".join(f"{pair}:{a.rsi_1h:.2f}:{a.atr_percent_1h:.3f}" for pair, a in analyses.items())
     )
     return signals, short_signals, analyses, bearish_analyses, scalp_analyses, strategies, context
 
@@ -418,6 +422,7 @@ def main() -> None:
                 news_monitor,
                 pairs,
                 risk_profile,
+                veto_overrides=settings if reporter and reporter.is_compass else None,
             )
             signal_text = ",".join(
                 f"{pair}:{strategies[pair]}" for pair, signal in signals.items() if signal
