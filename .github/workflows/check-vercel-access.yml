@@ -1,0 +1,46 @@
+name: Check existing Vercel access
+on:
+  push:
+    branches: [diagnose/vercel-access-20260915]
+    paths: [.github/workflows/check-vercel-access.yml]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Verify project access without changing production
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error
+          team = "team_1d4sQl6NyXxlU4OeOg2zgZOv"
+          project = "prj_BOSQ7JaGC0FFolVJMj4S5nAyIS0a"
+          token = os.environ.get("VERCEL_TOKEN", "")
+          print("Existing deployment credential configured:", bool(token))
+          print("Existing team setting matches confirmed team:", os.environ.get("VERCEL_ORG_ID") == team)
+          print("Existing project setting matches confirmed project:", os.environ.get("VERCEL_PROJECT_ID") == project)
+          if not token:
+              raise SystemExit("The existing deployment credential is unavailable.")
+          req = urllib.request.Request(
+              f"https://api.vercel.com/v9/projects/{project}?teamId={team}",
+              headers={"Authorization": f"Bearer {token}"})
+          try:
+              with urllib.request.urlopen(req, timeout=25) as response:
+                  data = json.load(response)
+                  print("VERCEL_PROJECT_READ_OK", response.status)
+                  print("Confirmed project name:", data.get("name"))
+                  print("Project ID matches:", data.get("id") == project)
+                  print("Team ID matches:", data.get("accountId") == team)
+                  link = data.get("link", {})
+                  print("Linked repository:", link.get("org"), link.get("repo"))
+          except urllib.error.HTTPError as exc:
+              print("VERCEL_PROJECT_READ_FAILED_HTTP", exc.code)
+              raise SystemExit(1)
+          except urllib.error.URLError:
+              raise SystemExit("Vercel API connection failed.")
+          PY
