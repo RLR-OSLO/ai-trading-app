@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase } from "../lib/supabase";
+import { isCompassInternalAuth, supabase } from "../lib/supabase";
 import HowItWorks from "./how-it-works";
 import LogoutButton from "./logout-button";
+import RecoveredHistory from "./recovered-history";
 
 type Settings = {
   bot_enabled: boolean;
@@ -138,6 +139,7 @@ function Sparkline({ points, hours }: { points: HistoryPoint[]; hours: 3 | 6 | 1
 
 export default function TradingDashboard() {
   const [settings, setSettings] = useState<Settings>(defaults);
+  const [openingPositions, setOpeningPositions] = useState<{ symbol: string; quantity: number; quote_spent: number }[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -168,6 +170,11 @@ export default function TradingDashboard() {
     if (row) setSettings(row as Settings);
     if (recent) setTrades(recent as Trade[]);
     if (events?.[0]) setLastEvent(events[0] as BotEvent);
+    if (isCompassInternalAuth) {
+      const { data: positions, error: positionsError } = await supabase.from("trading_opening_positions").select("symbol,quantity,quote_spent");
+      if (positionsError) setMessage(positionsError.message);
+      else setOpeningPositions(positions ?? []);
+    }
     setLoaded(true);
   }, []);
 
@@ -288,8 +295,9 @@ export default function TradingDashboard() {
     const derivativeCurrentValue = derivativeOpen && derivativeMarkPrice !== null ? derivativeQuantity * derivativeMarkPrice : 0;
     const derivativeUnrealized = derivativeOpen && derivativeMarkPrice !== null ? derivativeEntryValue - derivativeCurrentValue : null;
     const orderedTrades = [...assetTrades].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-    let quantity = 0;
-    let invested = 0;
+    const opening = openingPositions.find((position) => position.symbol === symbol);
+    let quantity = Number(opening?.quantity ?? 0);
+    let invested = Number(opening?.quote_spent ?? 0);
     for (const trade of orderedTrades) {
       const tradeQuantity = Math.max(0, Number(trade.quantity));
       if (trade.side === "BUY") {
@@ -316,7 +324,7 @@ export default function TradingDashboard() {
     const adjustedInvested = quantity > 0 && authoritativeQuantity > 0 ? invested * Math.min(1, authoritativeQuantity / quantity) : 0;
     const unrealized = currentValue === null ? null : currentValue - adjustedInvested;
     return { asset, invested: adjustedInvested, quantity: authoritativeQuantity, pnl, currentPrice, currentValue, unrealized, owned, derivativeOpen, derivativeMode, derivativeQuantity, derivativeLeverage, derivativeEntryValue, derivativeCurrentValue, derivativeUnrealized };
-  }).sort((a, b) => Number(b.derivativeOpen) - Number(a.derivativeOpen) || Number(b.owned) - Number(a.owned) || Number(b.currentValue ?? 0) - Number(a.currentValue ?? 0) || MARKET_UNIVERSE.indexOf(a.asset as typeof MARKET_UNIVERSE[number]) - MARKET_UNIVERSE.indexOf(b.asset as typeof MARKET_UNIVERSE[number])),[assets, settings.quote_asset, trades, marketPrices, binanceBalances, binanceWalletValues]);
+  }).sort((a, b) => Number(b.derivativeOpen) - Number(a.derivativeOpen) || Number(b.owned) - Number(a.owned) || Number(b.currentValue ?? 0) - Number(a.currentValue ?? 0) || MARKET_UNIVERSE.indexOf(a.asset as typeof MARKET_UNIVERSE[number]) - MARKET_UNIVERSE.indexOf(b.asset as typeof MARKET_UNIVERSE[number])),[assets, settings.quote_asset, trades, marketPrices, binanceBalances, binanceWalletValues, openingPositions]);
 
 
   const sortedAllocations = useMemo(() => {
@@ -747,7 +755,7 @@ export default function TradingDashboard() {
 
     if (normalized.includes("pause") || normalized.includes("stopp bot") || normalized === "stopp") {
       await setLive(false);
-      reply = "Boten er pauset. Nye kjøp er blokkert, mens åpne posisjoner fortsatt overvåkes av stop-loss/trailing.";
+      reply = heartbeatField("recovery_locked") === "True" ? "Serveren sender bare status under gjenopprettingen. Ingen kjøp, salg eller automatisk stop-loss utføres før første aktivering." : "Boten er pauset. Nye kjøp er blokkert, mens åpne posisjoner fortsatt overvåkes av stop-loss/trailing.";
     } else if ((normalized.includes("hvorfor") || normalized.includes("signal") || normalized.includes("analyse")) && symbol) {
       reply = explainMarket(symbol);
     } else if (normalized.includes("hvorfor") && (normalized.includes("kjøp") || normalized.includes("handler") || normalized.includes("handel"))) {
@@ -761,7 +769,7 @@ export default function TradingDashboard() {
       const trade = trades[0];
       reply = trade ? `Siste registrerte handel er ${trade.side} ${trade.symbol}, ${Number(trade.quantity).toPrecision(6)} enheter. Realisert resultat: ${money(Number(trade.pnl ?? 0))} USDC.` : "Det er ikke registrert noen handler ennå.";
     } else if (normalized.includes("resultat") || normalized.includes("gevinst") || normalized.includes("tap")) {
-      reply = `Realisert totalresultat er ${money(stats.total)} USDC. Siste døgn: ${money(stats.day)} USDC. Vunnet: ${money(stats.won)} USDC. Tapt: ${money(Math.abs(stats.lost))} USDC. Estimerte gebyrer: ${money(stats.feesEstimate)} USDC.`;
+      reply = `${isCompassInternalAuth ? "Dette gjelder kun nye bot-handler etter databasebyttet. " : ""}Realisert totalresultat er ${money(stats.total)} USDC. Siste døgn: ${money(stats.day)} USDC. Vunnet: ${money(stats.won)} USDC. Tapt: ${money(Math.abs(stats.lost))} USDC. Estimerte gebyrer: ${money(stats.feesEstimate)} USDC.`;
     } else if (normalized.includes("sterkest") || normalized.includes("beste") || normalized.includes("best nå")) {
       const best = heartbeatField("best");
       reply = best ? `Sterkeste kandidat i siste scan er ${best.replaceAll(":", " / ")}. Dette er kandidat-rangering, ikke nødvendigvis et godkjent kjøpssignal.` : "Jeg har ikke fersk rangering fra siste scan.";
@@ -790,9 +798,10 @@ export default function TradingDashboard() {
         <div className="wallet-other"><span className="label">ANDRE BINANCE-LOMMEBØKER</span><strong>{binanceWalletBreakdown.size === 0 ? "–" : money(Array.from(binanceWalletBreakdown.values()).reduce((sum, value) => sum + value, 0))} {settings.quote_asset}</strong><small>{binanceWalletBreakdown.size === 0 ? "Ingen ekstra wallet-saldo registrert" : Array.from(binanceWalletBreakdown.entries()).map(([name, value]) => `${name}: ${money(value)}`).join(" · ")}</small><small>Vises separat og regnes ikke som ledig tradingkapital før overført til Spot/Futures.</small></div>
       </div>
     </section>
+    {isCompassInternalAuth && <section className="panel"><p><b>Gjenopprettet innlogging og Binance-tilkobling.</b> Tidligere botresultater er ikke fullt gjenopprettet. Bevarte posisjoner tas med med registrert kostpris; eldre Binance-handler vises separat nedenfor.</p><p className="muted">Kontroller handelsinnstillingene før du velger Start live. Før første aktivering sender serveren bare status og legger ikke inn eller endrer ordre.</p></section>}
     <section className="grid metrics">
       <article><span className="label">Tilgjengelig kapital</span><strong>{money(availableCapital)} {settings.quote_asset}</strong><small>Fri saldo tilgjengelig for boten</small></article>
-      <article><span className="label">Totalt resultat</span><strong className={stats.total < 0 ? "loss" : "gain"}>{money(stats.total)} USDC</strong><small>Realisert gevinst/tap</small></article>
+      <article><span className="label">{isCompassInternalAuth ? "Resultat etter gjenoppretting" : "Totalt resultat"}</span><strong className={stats.total < 0 ? "loss" : "gain"}>{money(stats.total)} USDC</strong><small>Realisert gevinst/tap</small></article>
       <article><span className="label">Vunnet</span><strong className="gain">{money(stats.won)} USDC</strong><small>Sum lønnsomme handler</small></article>
       <article><span className="label">Tapt</span><strong className="loss">{money(Math.abs(stats.lost))} USDC</strong><small>Sum tapte handler</small></article>
       <article><span className="label">Siste døgn</span><strong className={stats.day < 0 ? "loss" : "gain"}>{money(stats.day)} USDC</strong><small>Siste time: {money(stats.hour)} USDC</small></article>
@@ -903,6 +912,7 @@ export default function TradingDashboard() {
       <form className="chat-form" onSubmit={(event) => { event.preventDefault(); void sendChat(); }}><input aria-label="Skriv til botten" value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder="Spør om status, handler, signaler, risiko eller resultat …" /><button className="primary" type="submit">Send</button></form>
       <p className="chat-note">Dette er en lokal tradingassistent uten ekstra AI-kostnad. Den svarer ut fra ferske botdata og kan pause boten. Direkte ordre fra fritekst er sperret.</p>
     </section>
+    {isCompassInternalAuth && <RecoveredHistory />}
     <HowItWorks />
   </main>;
 }

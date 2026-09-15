@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from .reporting import supabase_headers
 
 LOG = logging.getLogger("ai_trader.manager")
 REFRESH_SECONDS = 60
@@ -39,9 +40,7 @@ def _vault_accounts() -> list[Account]:
         data=b"{}",
         method="POST",
         headers={
-            "apikey": key,
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
+            **supabase_headers(key),
         },
     )
     try:
@@ -133,7 +132,7 @@ def main() -> None:
             process = subprocess.Popen(
                 [sys.executable, "-m", "trader.worker"],
                 env=_child_env(account),
-                cwd="/opt/ai-trading-app",
+                cwd=str(Path(__file__).resolve().parent.parent),
             )
             children[user_id] = (process, account.fingerprint)
             LOG.info("started isolated trader for user=%s legacy=%s pid=%s", user_id, account.legacy, process.pid)

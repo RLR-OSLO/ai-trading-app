@@ -354,6 +354,12 @@ def market_scan(
     return signals, short_signals, analyses, bearish_analyses, scalp_analyses, strategies, context
 
 
+def recovery_execution_blocked(reporter, settings) -> bool:
+    # A fresh Compass account must first finish recovery and explicitly start
+    # trading from an MFA-verified dashboard. False/missing data fails closed.
+    return bool(reporter and reporter.is_compass and (settings or {}).get("execution_authorized") is not True)
+
+
 def main() -> None:
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO"),
@@ -371,7 +377,8 @@ def main() -> None:
         risk_profile = "normal"
         try:
             settings = reporter.get_settings() if reporter else None
-            if settings and settings.get("daily_loss_reset_at"):
+            recovery_locked = recovery_execution_blocked(reporter, settings)
+            if not recovery_locked and settings and settings.get("daily_loss_reset_at"):
                 try:
                     reset_ts = int(datetime.fromisoformat(str(settings["daily_loss_reset_at"]).replace("Z", "+00:00")).timestamp())
                     state_mtime = int(state_path.stat().st_mtime) if state_path.exists() else 0
@@ -391,7 +398,7 @@ def main() -> None:
             available_balance = free_quote_balance(client, quote_asset) if authenticated else Decimal("0")
             recent_trades = reporter.get_recent_trades() if authenticated and reporter else []
             learned = learning_factors(recent_trades)
-            if authenticated and reporter:
+            if not recovery_locked and authenticated and reporter:
                 recovered = recover_positions_from_trade_history(
                     client, state_path, recent_trades, quote_asset
                 )
@@ -431,8 +438,8 @@ def main() -> None:
                 bool(settings.get("bot_enabled")) and bool(settings.get("live_trading_enabled"))
                 if settings is not None else reporter is None
             )
-            allow_new_entries = master_live and dashboard_live
-            directive = reporter.get_pending_directive() if reporter and settings is not None else None
+            allow_new_entries = master_live and dashboard_live and not recovery_locked
+            directive = reporter.get_pending_directive() if reporter and settings is not None and not recovery_locked else None
             directive_symbol = str((directive or {}).get("symbol") or "")
             directive_direction = str((directive or {}).get("direction") or "")
             directive_mode = str((directive or {}).get("mode") or "")
@@ -479,13 +486,18 @@ def main() -> None:
                 account_total = spot_total + futures_total
                 reporter.record_event(
                     "heartbeat",
-                    f"engine=exit-guard-v3;live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
+                    f"engine=exit-guard-v3;recovery_locked={recovery_locked};live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
                     f"signals={signal_text};scores={score_text};scalp_scores={scalp_score_text};short_scores={short_score_text};"
                     f"prices={price_text};balances={balances_text};wallet_values={wallet_value_text};wallets={wallet_breakdown_text};account_total={account_total};spot_total={spot_total};spot_available={available_balance};futures_total={futures_total};futures_available={futures_available};invested_value={invested_value};markets={','.join(pairs)};"
                     f"best={best_pair}:{strategies[best_pair]}:{analyses[best_pair].score}/{scalp_analyses[best_pair].score};"
                     f"reasons={','.join(scalp_analyses[best_pair].reasons if strategies[best_pair] == 'scalp' else analyses[best_pair].reasons)}",
                 )
                 last_heartbeat = time.time()
+
+            if recovery_locked:
+                LOG.info("Compass recovery: reporting only; no state updates or orders")
+                time.sleep(int(os.getenv("WORKER_INTERVAL_SECONDS", "30")))
+                continue
 
             runtime_settings = dict(settings or {})
             if settings is None:
