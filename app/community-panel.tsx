@@ -54,6 +54,11 @@ export default function CommunityPanel() {
     finally { inFlight.current=false; }
   }, [showDone]);
   useEffect(() => { void refresh(); const timer=window.setInterval(()=>{ if (!document.hidden) void refresh(); },5000); return ()=>window.clearInterval(timer); }, [refresh]);
+  useEffect(() => {
+    const openActivity=()=>{setShowDone(true);nearBottom.current=true;void refresh();};
+    window.addEventListener("community:open-activity",openActivity);
+    return()=>window.removeEventListener("community:open-activity",openActivity);
+  },[refresh]);
   useEffect(() => { if (nearBottom.current && log.current) log.current.scrollTop=log.current.scrollHeight; }, [messages]);
   async function add(kind: "chat" | "idea") {
     const body=(kind==="chat"?message:idea).trim();
@@ -84,7 +89,7 @@ export default function CommunityPanel() {
     } catch { setError("Kunne ikke hente eldre meldinger. Prøv igjen."); }
     finally { setBusy(""); }
   }
-  return <div className="community-grid" id="fellesskap">
+  return <div className="community-grid" id="fellesskap" tabIndex={-1}>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">FELLES FOR GODKJENTE BRUKERE</p><h3>Brukerchat</h3></div><small>Oppdateres hvert 5. sekund</small></div>
       {olderAvailable && messages.length>0 && <button className="secondary compact" disabled={!!busy} onClick={()=>void older()}>Vis eldre meldinger</button>}
       <div className="community-chat" ref={log} onScroll={()=>{ if(log.current) nearBottom.current=log.current.scrollHeight-log.current.scrollTop-log.current.clientHeight<60; }} role="log" aria-label="Felles brukerchat">

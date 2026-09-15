@@ -6,6 +6,7 @@ import HowItWorks from "./how-it-works";
 import LogoutButton from "./logout-button";
 import RecoveredHistory from "./recovered-history";
 import CommunityPanel from "./community-panel";
+import CommunityNotifications from "./community-notifications";
 import BullrunAlerts from "./bullrun-alerts";
 import VetoControls, { VetoIndicators } from "./veto-controls";
 
@@ -792,6 +793,7 @@ export default function TradingDashboard() {
 
   return <main className="shell">
     <header className="topbar"><div><span className="eyebrow">AI TRADING APP</span><h1>Kontrollpanel</h1></div><div style={{ display: "flex", gap: 10, alignItems: "center" }}><span className="pill"><i /> {serverOnline ? "Server online" : "Ingen fersk serverstatus"}</span><LogoutButton /></div></header>
+    {isCompassInternalAuth && <CommunityNotifications />}
     <section className="hero"><div><p className="eyebrow">AI TRADING</p><h2>Spot, short-analyse og utvidet risikokontroll.</h2><p className="muted">Binance-uttak er deaktivert. Margin/Futures krever egne Binance-rettigheter.</p></div><div className="emergency-stop-box"><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button><small>Nødstopp blokkerer nye kjøp. Åpne posisjoner blir ikke dumpet umiddelbart; boten fortsetter å overvåke dem og kan selge ved stop-loss, trailing-stop eller annen aktiv exitregel. Start live igjen for å tillate nye kjøp.</small></div></section>
     <section className="panel" style={{ marginBottom: 18 }}>
       <div className="wallet-overview">
