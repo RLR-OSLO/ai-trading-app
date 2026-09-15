@@ -1,4 +1,4 @@
-name: Check existing Vercel access
+name: Prepare Compass auth preview
 on:
   push:
     branches: [diagnose/vercel-access-20260915]
@@ -6,41 +6,47 @@ on:
 permissions:
   contents: read
 jobs:
-  check:
+  configure-preview:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - name: Verify project access without changing production
+      - name: Set and verify the two public auth variables for the repair branch
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: |
           python3 - <<'PY'
-          import json, os, urllib.request, urllib.error
+          import json, os, urllib.request, urllib.parse, urllib.error
           team = "team_1d4sQl6NyXxlU4OeOg2zgZOv"
           project = "prj_BOSQ7JaGC0FFolVJMj4S5nAyIS0a"
-          token = os.environ.get("VERCEL_TOKEN", "")
-          print("Existing deployment credential configured:", bool(token))
-          print("Existing team setting matches confirmed team:", os.environ.get("VERCEL_ORG_ID") == team)
-          print("Existing project setting matches confirmed project:", os.environ.get("VERCEL_PROJECT_ID") == project)
-          if not token:
-              raise SystemExit("The existing deployment credential is unavailable.")
-          req = urllib.request.Request(
-              f"https://api.vercel.com/v9/projects/{project}?teamId={team}",
-              headers={"Authorization": f"Bearer {token}"})
-          try:
-              with urllib.request.urlopen(req, timeout=25) as response:
-                  data = json.load(response)
-                  print("VERCEL_PROJECT_READ_OK", response.status)
-                  print("Confirmed project name:", data.get("name"))
-                  print("Project ID matches:", data.get("id") == project)
-                  print("Team ID matches:", data.get("accountId") == team)
-                  link = data.get("link", {})
-                  print("Linked repository:", link.get("org"), link.get("repo"))
-          except urllib.error.HTTPError as exc:
-              print("VERCEL_PROJECT_READ_FAILED_HTTP", exc.code)
-              raise SystemExit(1)
-          except urllib.error.URLError:
-              raise SystemExit("Vercel API connection failed.")
+          branch = "repair/compass-internal-auth"
+          assert os.environ["VERCEL_ORG_ID"] == team
+          assert os.environ["VERCEL_PROJECT_ID"] == project
+          token = os.environ["VERCEL_TOKEN"]
+          values = {
+              "NEXT_PUBLIC_SUPABASE_URL": "https://nsqsqupucxgrkwotegof.supabase.co",
+              "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_9YkXGtxm_doyp7RihMaAcA_FlaWphlz",
+          }
+          def api(query, payload=None):
+              url = f"https://api.vercel.com/v10/projects/{project}/env?" + urllib.parse.urlencode({"teamId": team, **query})
+              request = urllib.request.Request(url, data=None if payload is None else json.dumps(payload).encode(), headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+              try:
+                  with urllib.request.urlopen(request, timeout=25) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as exc:
+                  raise SystemExit(f"Vercel configuration request failed with HTTP {exc.code}")
+          payload = [{"key": k, "value": v, "type": "encrypted", "target": ["preview"], "gitBranch": branch} for k,v in values.items()]
+          result = api({"upsert": "true"}, payload)
+          if result.get("failed"):
+              raise SystemExit("Vercel rejected one or more preview variables.")
+          result = api({"gitBranch": branch, "decrypt": "true"})
+          rows = result if isinstance(result, list) else result.get("envs", [result])
+          for key, expected in values.items():
+              row = next((r for r in rows if r.get("key") == key and r.get("gitBranch") == branch), None)
+              assert row is not None, f"Missing preview variable: {key}"
+              assert row.get("value") == expected, f"Incorrect preview value: {key}"
+              assert row.get("target") == ["preview"], "Unexpected environment target"
+              print("PREVIEW_AUTH_VERIFIED", key)
+          print("PRODUCTION_CONFIGURATION_UNCHANGED")
           PY
