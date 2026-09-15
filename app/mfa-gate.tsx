@@ -43,11 +43,11 @@ export default function MfaGate({ children }: Readonly<{ children: React.ReactNo
     setBusy(false);
   }
   if (ready) return <>{children}</>;
-  return <main className="gate-shell"><section className="gate-card" style={{ maxWidth: 480 }}>
+  return <main className="gate-shell"><section className="gate-card" style={{ width: "min(560px, 100%)", padding: "clamp(16px, 4vw, 32px)" }}>
     <p className="eyebrow">AI TRADING APP</p><h1>Tofaktorbekreftelse</h1>
     {loading ? <p>Kontrollerer sikker innlogging …</p> : <>
       {!factorId && <><p>Koble Google Authenticator til innloggingen i Compass Internal. Oppsettet fra det tidligere prosjektet er ikke overført.</p><button className="primary" disabled={busy} onClick={() => void enroll()}>Koble Google Authenticator</button></>}
-      {qr && <><p>Skann QR-koden med Google Authenticator og skriv inn den sekssifrede koden.</p><img src={qr} alt="QR-kode for tofaktoroppsett" width={220} height={220} /></>}
+      {qr && <><p>Skann QR-koden med Google Authenticator og skriv inn den sekssifrede koden.</p><img src={qr} alt="QR-kode for tofaktoroppsett" width={400} height={400} style={{ display: "block", width: "100%", maxWidth: 400, height: "auto", margin: "24px auto", padding: 24, background: "#fff", imageRendering: "pixelated" }} /></>}
       {factorId && <form onSubmit={(event) => { event.preventDefault(); void verify(); }}>
         {factors.length > 1 && <label>Velg autentikator<select value={factorId} onChange={(event) => setFactorId(event.target.value)}>{factors.map((factor) => <option value={factor.id} key={factor.id}>{factor.friendly_name || "Autentikator"}</option>)}</select></label>}
         <label htmlFor="mfa-code">Kode fra Google Authenticator</label>
