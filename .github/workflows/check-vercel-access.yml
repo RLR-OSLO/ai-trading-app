@@ -1,4 +1,4 @@
-name: Prepare Compass auth preview
+name: Verify Compass Google redirects
 on:
   push:
     branches: [diagnose/vercel-access-20260915]
@@ -6,51 +6,33 @@ on:
 permissions:
   contents: read
 jobs:
-  configure-preview:
+  verify-oauth:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - name: Set and verify the two public auth variables for the repair branch
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      - name: Verify Google provider and both allowed return origins
         run: |
           python3 - <<'PY'
-          import json, os, urllib.request, urllib.parse, urllib.error
-          team = "team_1d4sQl6NyXxlU4OeOg2zgZOv"
-          project = "prj_BOSQ7JaGC0FFolVJMj4S5nAyIS0a"
-          branch = "repair/compass-internal-auth"
-          assert os.environ["VERCEL_ORG_ID"] == team
-          assert os.environ["VERCEL_PROJECT_ID"] == project
-          token = os.environ["VERCEL_TOKEN"]
-          values = {
-              "NEXT_PUBLIC_SUPABASE_URL": "https://nsqsqupucxgrkwotegof.supabase.co",
-              "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_9YkXGtxm_doyp7RihMaAcA_FlaWphlz",
-          }
-          def api(query, payload=None):
-              url = f"https://api.vercel.com/v10/projects/{project}/env?" + urllib.parse.urlencode({"teamId": team, **query})
-              request = urllib.request.Request(url, data=None if payload is None else json.dumps(payload).encode(), headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+          import urllib.request, urllib.parse, urllib.error, json, base64
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl): return None
+          opener = urllib.request.build_opener(NoRedirect)
+          for origin in ["https://ai-trading-app-mocha.vercel.app", "https://ai-trading-app-git-repair-compas-5833a0-rudi-rorstad-s-projects.vercel.app"]:
+              url = "https://nsqsqupucxgrkwotegof.supabase.co/auth/v1/authorize?" + urllib.parse.urlencode({"provider":"google","redirect_to":origin})
               try:
-                  with urllib.request.urlopen(request, timeout=25) as response:
-                      return json.load(response)
+                  response = opener.open(url, timeout=25)
+                  raise SystemExit("Expected OAuth redirect")
               except urllib.error.HTTPError as exc:
-                  raise SystemExit(f"Vercel configuration request failed with HTTP {exc.code}")
-          payload = [{"key": k, "value": v, "type": "encrypted", "target": ["preview"], "gitBranch": branch} for k,v in values.items()]
-          result = api({"upsert": "true"}, payload)
-          if result.get("failed"):
-              raise SystemExit("Vercel rejected one or more preview variables.")
-          result = api({"gitBranch": branch, "decrypt": "true"})
-          rows = result if isinstance(result, list) else result.get("envs", [result])
-          for key, expected in values.items():
-              row = next((r for r in rows if r.get("key") == key and r.get("gitBranch") == branch), None)
-              assert row is not None, f"Missing preview variable: {key}"
-              read_url = f"https://api.vercel.com/v1/projects/{project}/env/{row['id']}?" + urllib.parse.urlencode({"teamId": team})
-              request = urllib.request.Request(read_url, headers={"Authorization": f"Bearer {token}"})
-              with urllib.request.urlopen(request, timeout=25) as response:
-                  decrypted = json.load(response)
-              assert decrypted.get("value") == expected, f"Incorrect preview value: {key}"
-              assert row.get("target") == ["preview"], "Unexpected environment target"
-              print("PREVIEW_AUTH_VERIFIED", key)
-          print("PRODUCTION_CONFIGURATION_UNCHANGED")
+                  assert exc.code == 302, f"OAuth HTTP {exc.code}"
+                  location = exc.headers.get("Location", "")
+                  parsed = urllib.parse.urlparse(location)
+                  assert parsed.hostname == "accounts.google.com", "Unexpected provider"
+                  query = urllib.parse.parse_qs(parsed.query)
+                  parts = query.get("state", [""])[0].split(".")
+                  assert len(parts) == 3, "Unrecognized OAuth state format"
+                  data = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+                  print("OAUTH_STATE_FIELDS", ",".join(sorted(data.keys())))
+                  assert data.get("referrer") == origin, "Requested redirect was not accepted"
+                  assert query.get("redirect_uri") == ["https://nsqsqupucxgrkwotegof.supabase.co/auth/v1/callback"]
+                  print("GOOGLE_REDIRECT_VERIFIED", origin)
           PY
