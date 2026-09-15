@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Sequence
+from typing import Mapping, Sequence
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,17 @@ def _macd_positive(values: Sequence[Decimal]) -> bool:
     return _ema(values, 12) > _ema(values, 26)
 
 
-def analyze_market(timeframes: dict[str, Sequence[Sequence[object]]]) -> MarketAnalysis:
+def entry_vetoes(rsi: Decimal, atr: Decimal, overrides: Mapping[str, object] | None = None) -> tuple[str, ...]:
+    options = overrides or {}
+    checks = (("rsi_high", rsi >= Decimal("75")),
+              ("rsi_low", rsi <= Decimal("35")),
+              ("atr", atr > Decimal("8")))
+    return tuple(name for name, triggered in checks
+                 if triggered and options.get("ignore_" + name + "_veto") is not True)
+
+
+def analyze_market(timeframes: dict[str, Sequence[Sequence[object]]],
+                   veto_overrides: Mapping[str, object] | None = None) -> MarketAnalysis:
     required = {"15m", "1h", "4h"}
     if not required.issubset(timeframes):
         raise ValueError("15m, 1h and 4h data are required")
@@ -100,7 +110,8 @@ def analyze_market(timeframes: dict[str, Sequence[Sequence[object]]]) -> MarketA
         score += 1
         reasons.append("tradable_volatility")
 
-    veto = rsi >= Decimal("75") or rsi <= Decimal("35") or atr_percent > Decimal("8")
+    veto = entry_vetoes(rsi, atr_percent, veto_overrides)
+    reasons.extend(name + "_veto" for name in veto)
     if veto:
         reasons.append("risk_veto")
     confidence = min(Decimal("1"), Decimal(score) / Decimal("9"))

@@ -52,7 +52,7 @@ class SupabaseReporter:
     def get_settings(self) -> dict[str, Any] | None:
         query = urllib.parse.urlencode({
             "user_id": f"eq.{self.user_id}",
-            "select": "bot_enabled,live_trading_enabled,risk_profile,quote_asset,trade_cap_usdc,order_size_usdc,stop_loss_percent,take_profit_percent,max_daily_loss_usdc,short_enabled,futures_enabled,leverage,daily_loss_reset_at" + (",execution_authorized" if self.is_compass else ""),
+            "select": "bot_enabled,live_trading_enabled,risk_profile,quote_asset,trade_cap_usdc,order_size_usdc,stop_loss_percent,take_profit_percent,max_daily_loss_usdc,short_enabled,futures_enabled,leverage,daily_loss_reset_at" + (",execution_authorized,ignore_rsi_high_veto,ignore_rsi_low_veto,ignore_atr_veto" if self.is_compass else ""),
             "limit": "1",
         })
         request = urllib.request.Request(
