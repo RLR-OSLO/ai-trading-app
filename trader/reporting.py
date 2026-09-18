@@ -163,3 +163,43 @@ class SupabaseReporter:
 
     def record_event(self, event_type: str, message: str, level: str = "info") -> None:
         self._insert("bot_events", {"level": level, "event_type": event_type, "message": message})
+
+    def _commands_request(self, table, method="GET", filters=None, payload=None):
+        query = urllib.parse.urlencode({**(filters or {}), "user_id": f"eq.{self.user_id}"})
+        request = urllib.request.Request(f"{self.url}/rest/v1/{table}?{query}", method=method,
+            data=json.dumps(payload).encode() if payload is not None else None,
+            headers={**supabase_headers(self.service_role_key), "Prefer": "return=representation"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read()
+            return json.loads(raw) if raw else []
+
+    def get_commands(self):
+        self._commands_request("trading_commands", "PATCH",
+            {"status": "eq.pending", "expires_at": "lte.now()"},
+            {"status": "expired", "result": "Utløpt etter 15 minutter uten utførelse"})
+        return self._commands_request("trading_commands", filters={
+            "status": "in.(pending,processing)", "order": "created_at.asc", "limit": "100"})
+
+    def claim_command(self, command_id):
+        rows = self._commands_request("trading_commands", "PATCH",
+            {"id": f"eq.{command_id}", "status": "eq.pending", "expires_at": "gt.now()"},
+            {"status": "processing", "result": "Behandles av motoren"})
+        return rows[0] if rows else None
+
+    def command_result(self, command_id, status, result):
+        if status not in {"pending", "processing", "executed", "rejected"}:
+            raise ValueError("Invalid command status")
+        self._commands_request("trading_commands", "PATCH", {
+            "id": f"eq.{command_id}",
+            "status": "eq.pending" if status == "pending" else "in.(pending,processing)",
+        }, {"status": status, "result": result[:1000]})
+
+    def publish_positions(self, positions, *, enabled=True):
+        from datetime import UTC, datetime
+        request = urllib.request.Request(
+            f"{self.url}/rest/v1/trading_position_snapshots?on_conflict=user_id", method="POST",
+            data=json.dumps({"user_id": self.user_id, "positions": positions,
+                "updated_at": datetime.now(UTC).isoformat(), "engine": "user-commands-v5" if enabled else "disabled"}).encode(),
+            headers={**supabase_headers(self.service_role_key), "Prefer": "resolution=merge-duplicates,return=minimal"})
+        with urllib.request.urlopen(request, timeout=10):
+            pass

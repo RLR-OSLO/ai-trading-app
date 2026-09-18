@@ -50,6 +50,7 @@ class Position:
     peak_price: str | None = None
     trailing_active: bool = False
     trailing_stop_price: str | None = None
+    user_managed: bool = False
 
 
 @dataclass
@@ -68,6 +69,8 @@ class PortfolioState:
     pending_max_hold_seconds: int | None = None
     reentry_blocks: dict[str, dict[str, Any]] | None = None
     pending_reports: list[dict[str, Any]] = field(default_factory=list)
+    active_command: dict[str, Any] | None = None
+    command_receipts: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.positions is None:
@@ -103,14 +106,16 @@ class PortfolioLimits:
     @classmethod
     def from_settings(cls, settings: dict[str, Any]) -> "PortfolioLimits":
         profile = str(settings.get("risk_profile", "normal")).lower()
-        max_trades, cooldown, max_positions = PROFILE_LIMITS.get(profile, PROFILE_LIMITS["normal"])
+        _, cooldown, max_positions = PROFILE_LIMITS.get(profile, PROFILE_LIMITS["normal"])
         return cls.from_values(
             settings.get("trade_cap_usdc", "100"),
             settings.get("order_size_usdc", "25"),
             settings.get("stop_loss_percent", "1"),
             settings.get("take_profit_percent", "2"),
             settings.get("max_daily_loss_usdc", "2"),
-            max_trades=max_trades,
+            # No hidden daily order-count quota for dashboard accounts. Entry
+            # quality, pacing and the user's capital/loss settings still apply.
+            max_trades=0,
             cooldown=cooldown,
             max_positions=max_positions,
         )
@@ -143,8 +148,8 @@ class PortfolioLimits:
             raise ValueError("LIVE_TARGET_PERCENT is outside the safety range")
         if not (Decimal("0.5") <= daily_loss <= cap):
             raise ValueError("LIVE_DAILY_LOSS_USDC is outside the safety range")
-        if not (1 <= max_trades <= 100):
-            raise ValueError("LIVE_MAX_TRADES_PER_DAY must be between 1 and 100")
+        if not (0 <= max_trades <= 100):
+            raise ValueError("LIVE_MAX_TRADES_PER_DAY must be between 0 (unlimited) and 100")
         if not (15 <= cooldown <= 86400):
             raise ValueError("LIVE_COOLDOWN_SECONDS is outside the safety range")
         if not (1 <= max_positions <= 10):
@@ -164,6 +169,7 @@ def _position_from_raw(raw: dict[str, Any]) -> Position:
         str(raw.get("strategy") or "swing"), raw.get("stop_fraction"), raw.get("target_fraction"),
         int(raw["max_hold_seconds"]) if raw.get("max_hold_seconds") is not None else None,
         raw.get("peak_price"), bool(raw.get("trailing_active", False)), raw.get("trailing_stop_price"),
+        bool(raw.get("user_managed", False)),
     )
 
 
@@ -183,6 +189,7 @@ def load_state(path: Path) -> PortfolioState:
         int(raw["pending_max_hold_seconds"]) if raw.get("pending_max_hold_seconds") is not None else None,
         raw.get("reentry_blocks", {}),
         raw.get("pending_reports", []),
+        raw.get("active_command"), raw.get("command_receipts", {}),
     )
     if state.day != _today():
         state.day, state.realized_pnl, state.trades_today = _today(), "0", 0
@@ -528,7 +535,8 @@ def _reconcile(client, state, path, quote, limits, report_trade):
     return f"paused_pending_reconciliation:{state.pending_action}"
 
 
-def _market_sell(client, state, state_path, position, limits, report_trade, now: int, reason: str) -> str:
+def _market_sell(client, state, state_path, position, limits, report_trade, now: int, reason: str,
+                 maximum_quantity: Decimal | None = None) -> str:
     base_asset = position.symbol.removesuffix("USDC") if position.symbol.endswith("USDC") else position.symbol.removesuffix("USDT")
     account = client.account()
     free_balance = Decimal("0")
@@ -539,6 +547,8 @@ def _market_sell(client, state, state_path, position, limits, report_trade, now:
             total_balance = free_balance + Decimal(str(row.get("locked", "0")))
             break
     quantity = _sellable_quantity(client, position.symbol, min(Decimal(position.quantity), free_balance))
+    if maximum_quantity is not None:
+        quantity = _sellable_quantity(client, position.symbol, min(quantity, maximum_quantity))
     if quantity <= 0:
         total_sellable = _sellable_quantity(client, position.symbol, min(Decimal(position.quantity), total_balance))
         if total_sellable <= 0:
@@ -578,6 +588,10 @@ def run_portfolio_cycle(
     other_realized_pnl: Decimal = Decimal("0"),
     other_open_notional: Decimal = Decimal("0"),
     blocked_symbols: frozenset[str] = frozenset(),
+    user_priority: bool = False,
+    requested_notional: Decimal | None = None,
+    manage_exits: bool = True,
+    authorized_only: bool = False,
 ) -> str:
     state = load_state(state_path)
     now = int(time.time())
@@ -596,7 +610,9 @@ def run_portfolio_cycle(
     save_state(state_path, state)
 
     notes: list[str] = []
-    for position in list(state.positions or []):
+    for position in list(state.positions or []) if manage_exits else []:
+        if authorized_only and not position.user_managed:
+            continue
         if not _protection_enabled() and (position.protective_order_list_id is not None or position.protective_order_ids):
             if not _cancel_protection(client, state, state_path, position):
                 notes.append(f"local_stop_release_failed:{position.symbol}")
@@ -716,16 +732,16 @@ def run_portfolio_cycle(
         return "paused_reporting_backlog"
     if Decimal(state.realized_pnl) + other_realized_pnl <= -limits.daily_loss:
         return "paused_daily_loss"
-    if state.trades_today >= limits.max_trades_per_day:
+    if not user_priority and limits.max_trades_per_day and state.trades_today >= limits.max_trades_per_day:
         return "paused_trade_limit"
-    if len(state.positions or []) >= limits.max_open_positions:
+    if not user_priority and len(state.positions or []) >= limits.max_open_positions:
         return f"max_positions:{len(state.positions or [])}"
-    if now < state.cooldown_until:
+    if not user_priority and now < state.cooldown_until:
         return "cooldown"
 
     open_symbols = {p.symbol for p in state.positions or []}
     candidates = [symbol for symbol, active in signals.items()
-                  if active and symbol not in open_symbols and symbol not in state.reentry_blocks
+                  if active and symbol not in open_symbols and (user_priority or symbol not in state.reentry_blocks)
                   and symbol not in blocked_symbols]
     if not candidates:
         return ";".join(notes) if notes else "no_signal"
@@ -750,6 +766,10 @@ def run_portfolio_cycle(
     # order_size is a hard maximum per position. Signal quality chooses a smaller
     # amount when conviction is weaker, but can use the full maximum on the best setups.
     spend = min(limits.order_size * multiplier, free_quote, remaining_cap)
+    if requested_notional is not None:
+        if not requested_notional.is_finite() or requested_notional < 5:
+            raise ValueError("Invalid requested notional")
+        spend = min(requested_notional, limits.order_size, free_quote, remaining_cap)
     if remaining_cap < Decimal("5"):
         return "capital_cap_reached"
     if spend < Decimal("5"):

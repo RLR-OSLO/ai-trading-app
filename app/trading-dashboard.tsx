@@ -10,6 +10,7 @@ import CommunityNotifications from "./community-notifications";
 import BullrunAlerts from "./bullrun-alerts";
 import VetoControls, { VetoIndicators } from "./veto-controls";
 import TradingActivity from "./trading-activity";
+import { TradingCommandsProvider, PositionActions, TradingCommandStatus, useTradingCommands } from "./trading-commands";
 
 type Settings = {
   bot_enabled: boolean;
@@ -30,7 +31,6 @@ type Settings = {
 type Trade = { id: string; symbol: string; mode: string; side: "BUY" | "SELL"; quantity: number; entry_price: number | null; exit_price: number | null; pnl: number | null; leverage?: number | null; created_at: string };
 type BotEvent = { id: number; level: "info" | "warning" | "error"; event_type: string; message: string; created_at: string };
 type ChatMessage = { id: number; role: "boss" | "bot"; text: string };
-type TradeDirective = { id: number; symbol: string; direction: "LONG" | "SHORT"; mode: "SPOT" | "MARGIN" | "FUTURES"; requested_notional: number; leverage: number; status: string; created_at: string; expires_at: string };
 
 const defaults: Settings = {
   bot_enabled: false,
@@ -143,6 +143,11 @@ function Sparkline({ points, hours }: { points: HistoryPoint[]; hours: 3 | 6 | 1
 }
 
 export default function TradingDashboard() {
+  return <TradingCommandsProvider><DashboardContent /></TradingCommandsProvider>;
+}
+
+function DashboardContent() {
+  const commandControls = useTradingCommands();
   const [settings, setSettings] = useState<Settings>(defaults);
   const settingsDirty = useRef(false);
   const settingsRevision = useRef(0);
@@ -158,8 +163,6 @@ export default function TradingDashboard() {
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
   const [chatInput, setChatInput] = useState("");
   const [serverSignalExpanded, setServerSignalExpanded] = useState(false);
-  const [priorityDirectives, setPriorityDirectives] = useState<TradeDirective[]>([]);
-  const [priorityBusy, setPriorityBusy] = useState<number | null>(null);
   const [historyHours, setHistoryHours] = useState<3 | 6 | 12>(6);
   const [marketHistory, setMarketHistory] = useState<HistoryMap>({});
   const [setupAmounts, setSetupAmounts] = useState<Record<string, string>>({});
@@ -206,24 +209,6 @@ export default function TradingDashboard() {
     window.addEventListener("focus", refresh);
     return () => { window.clearInterval(timer); window.removeEventListener("focus", refresh); };
   }, [load]);
-
-  async function loadPriorityDirectives() {
-    const { data: userData } = await supabase.auth.getUser();
-    if (!userData.user) { setPriorityDirectives([]); return; }
-    const { data, error } = await supabase
-      .from("trade_directives")
-      .select("id,symbol,direction,mode,requested_notional,leverage,status,created_at,expires_at")
-      .eq("user_id", userData.user.id)
-      .eq("status", "pending")
-      .order("created_at", { ascending: false });
-    if (!error) setPriorityDirectives((data ?? []) as TradeDirective[]);
-  }
-
-  useEffect(() => {
-    void loadPriorityDirectives();
-    const timer = window.setInterval(() => void loadPriorityDirectives(), 5_000);
-    return () => window.clearInterval(timer);
-  }, []);
 
   const stats = useMemo(() => {
     const now = Date.now();
@@ -615,7 +600,7 @@ export default function TradingDashboard() {
   }
 
   async function emergencyStop() {
-    const confirmed = window.confirm("Aktivere nødstopp? Nye kjøp stoppes. Eksisterende posisjoner beholdes under aktiv stop-loss/trailing og kan fortsatt selges automatisk for å beskytte kapitalen.");
+    const confirmed = window.confirm("Aktivere nødstopp? Nye automatiske kjøp stoppes og ventende kjøpsprioriteter avbrytes. Ordre som allerede behandles kan bli utført. Aktiverte posisjoner beholder stop-loss og gevinstsikring.");
     if (!confirmed) return;
     setSaving(true); setMessage("");
     const next = { ...settings, bot_enabled: false, live_trading_enabled: false };
@@ -623,7 +608,14 @@ export default function TradingDashboard() {
     if (!userData.user) { setSaving(false); return; }
     const { error } = await supabase.from("bot_settings").upsert({ ...next, user_id: userData.user.id, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
     if (!error) { settingsDirty.current = false; settingsRevision.current++; setSettings(next); }
-    setMessage(error ? error.message : "NØDSTOPP AKTIV: Nye kjøp er blokkert. Eksisterende posisjoner overvåkes fortsatt av stop-loss/trailing og kan selges automatisk.");
+    if (!error && isCompassInternalAuth) {
+      try { await commandControls.cancelPendingEntries(); }
+      catch (reason) {
+        setMessage(`Automatiske kjøp er pauset, men kjøpsprioriteter kunne ikke avbrytes: ${reason instanceof Error ? reason.message : "ukjent feil"}. Kontroller ordrelisten.`);
+        setSaving(false); return;
+      }
+    }
+    setMessage(error ? error.message : "NØDSTOPP AKTIV: Automatiske kjøp er pauset og ventende kjøpsprioriteter avbrutt. Ordre som allerede behandles kan bli utført. Aktiverte posisjoner beholder stop-loss og gevinstsikring.");
     setSaving(false);
   }
 
@@ -674,27 +666,9 @@ export default function TradingDashboard() {
     return `${base} er med i aktiv overvåking, men har ikke kjøpssignal nå. Swing-score er ${swing ?? "–"}${threshold ? ` mot krav ${threshold}` : ""}, og scalp-score er ${scalp ?? "–"}. ${isBullrun ? "Den er markert som bull run, men et annet risikofilter blokkerer entry." : "Bull-run-signal er ikke aktivt."}`;
   }
 
-  async function stopPriority(directive: TradeDirective) {
-    setPriorityBusy(directive.id);
-    const { data: userData } = await supabase.auth.getUser();
-    if (!userData.user) { setPriorityBusy(null); return; }
-    const { error } = await supabase
-      .from("trade_directives")
-      .update({ status: "cancelled", result: "Priority stopped by user" })
-      .eq("id", directive.id)
-      .eq("user_id", userData.user.id)
-      .eq("status", "pending");
-    if (error) {
-      setMessage(`Kunne ikke stoppe prioritet: ${error.message}`);
-    } else {
-      setPriorityDirectives((current) => current.filter((item) => item.id !== directive.id));
-      setMessage(`Prioritet stoppet for ${directive.direction} ${directive.symbol}.`);
-    }
-    setPriorityBusy(null);
-  }
-
   async function prioritizeSetup(setup: { symbol: string; direction: "LONG" | "SHORT" | "VENT"; mode: string; suggested: number; recommendedLeverage: number; configuredLeverage: number; canExecute: boolean }) {
-    if (setup.direction === "VENT") return;
+    if (setup.direction === "VENT" || !commandControls.ready || commandControls.busy) return;
+    if (settingsDirty.current) { setMessage("Lagre innstillingene før du sender en prioritet."); return; }
     if (!setup.canExecute) { setMessage("Shorting er ikke aktivert i innstillingene."); return; }
     const amountKey = `${setup.symbol}:${setup.direction}`;
     const requestedAmount = Number(setupAmounts[amountKey] ?? setup.suggested.toFixed(2));
@@ -704,24 +678,12 @@ export default function TradingDashboard() {
     const cleanMode = setup.mode.startsWith("FUTURES") ? "FUTURES" : setup.mode === "MARGIN" ? "MARGIN" : "SPOT";
     const activeLeverage = Math.max(1, Math.min(20, Number(settings.leverage) || 1));
     const leverageText = setup.direction === "SHORT" ? `Anbefalt ${setup.recommendedLeverage}x. Aktiv innstilling: ${activeLeverage}x.` : "Spot gjennomføres uten gearing.";
-    const confirmed = window.confirm(`Be boten prioritere og gjennomføre ${setup.direction} ${setup.symbol} via ${setup.mode} for ${money(requestedAmount)} ${settings.quote_asset}? ${leverageText} Alle vanlige risikogrenser gjelder fortsatt.`);
+    const confirmed = window.confirm(`Be boten prioritere og gjennomføre ${setup.direction} ${setup.symbol} via ${setup.mode} for ${money(requestedAmount)} ${settings.quote_asset}? ${leverageText} Dette kan utføres selv om automatikken er pauset. Prioriteten venter på et gyldig signal i inntil 15 minutter. Dine kapital- og tapsgrenser gjelder fortsatt. Den kjøpte posisjonen følges av automatisk stop-loss og gevinstsikring.`);
     if (!confirmed) return;
-    const { data: userData } = await supabase.auth.getUser();
-    if (!userData.user) { setMessage("Du må være innlogget."); return; }
-    const { data: created, error } = await supabase.from("trade_directives").insert({
-      user_id: userData.user.id,
-      symbol: setup.symbol,
-      direction: setup.direction,
-      mode: cleanMode,
-      requested_notional: requestedAmount,
-      leverage: cleanMode === "FUTURES" ? activeLeverage : 1,
-    }).select("id,symbol,direction,mode,requested_notional,leverage,status,created_at,expires_at").single();
-    if (error) {
-      setMessage(`Kunne ikke sende direktiv: ${error.message}`);
-    } else {
-      if (created) setPriorityDirectives((current) => [created as TradeDirective, ...current.filter((item) => !(item.symbol === setup.symbol && item.direction === setup.direction))]);
-      setMessage(`PRIORITERT: ${setup.direction} ${setup.symbol}. Boten forsøker på neste syklus hvis signalet fortsatt er gyldig.`);
-    }
+    await commandControls.submit({
+      action: "PRIORITY_OPEN", symbol: setup.symbol, mode: cleanMode,
+      requested_notional: requestedAmount, leverage: cleanMode === "FUTURES" ? activeLeverage : 1,
+    });
   }
 
   async function downloadTradesCsv() {
@@ -819,8 +781,8 @@ export default function TradingDashboard() {
   return <main className="shell">
     <header className="topbar"><div><span className="eyebrow">AI TRADING APP</span><h1>Kontrollpanel</h1></div><div style={{ display: "flex", gap: 10, alignItems: "center" }}><span className="pill"><i /> {serverOnline ? "Server online" : "Ingen fersk serverstatus"}</span><LogoutButton /></div></header>
     {isCompassInternalAuth && <CommunityNotifications />}
-    <TradingActivity heartbeat={lastEvent} events={activityEvents} trade={trades[0]} error={refreshError} refreshedAt={refreshedAt} enabled={settings.bot_enabled} live={settings.live_trading_enabled} onRefresh={() => { void load().catch(() => setRefreshError("Forbindelsen ble avbrutt")); }} />
-    <section className="hero"><div><p className="eyebrow">AI TRADING</p><h2>Spot, short-analyse og utvidet risikokontroll.</h2><p className="muted">Binance-uttak er deaktivert. Margin/Futures krever egne Binance-rettigheter.</p></div><div className="emergency-stop-box"><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button><small>Nødstopp blokkerer nye kjøp. Åpne posisjoner blir ikke dumpet umiddelbart; boten fortsetter å overvåke dem og kan selge ved stop-loss, trailing-stop eller annen aktiv exitregel. Start live igjen for å tillate nye kjøp.</small></div></section>
+    <TradingActivity heartbeat={lastEvent} events={activityEvents} trade={trades[0]} error={refreshError} refreshedAt={refreshedAt} enabled={settings.bot_enabled} live={settings.live_trading_enabled} onStart={() => void setLive(true)} starting={saving || !loaded} onRefresh={() => { void load().catch(() => setRefreshError("Forbindelsen ble avbrutt")); }} />
+    <section className="hero"><div><p className="eyebrow">AI TRADING</p><h2>Spot, short-analyse og utvidet risikokontroll.</h2><p className="muted">Binance-uttak er deaktivert. Margin/Futures krever egne Binance-rettigheter.</p></div><div className="emergency-stop-box"><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button><small>Nødstopp blokkerer nye kjøp. Åpne posisjoner blir ikke dumpet umiddelbart; boten fortsetter å overvåke dem og kan selge ved stop-loss, trailing-stop eller annen aktiv exitregel. Start automatisk handel igjen for å tillate nye automatiske kjøp.</small></div></section>
     <section className="panel" style={{ marginBottom: 18 }}>
       <div className="wallet-overview">
         <div className="wallet-total"><span className="label">TOTAL BINANCE-VERDI</span><strong>{money(totalAssets)} {settings.quote_asset}</strong><small>Spot + Futures</small></div>
@@ -888,7 +850,7 @@ export default function TradingDashboard() {
           </select>
           <small>Manuelt valg per bruker. Boten endrer aldri gearing. 5–10x krever et svært sterkt signal. 20x er kun manuell ekstreminnstilling.</small>
         </label>
-      </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause trading" : "Start live"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button><button className="secondary" onClick={() => void resetDailyLoss()} disabled={saving || !loaded}>Reset dagstap</button></div>{message && <p className="inline-message">{message}</p>}
+      </div><div className="actions"><button onClick={() => void setLive(!settings.live_trading_enabled)} disabled={saving || !loaded}>{settings.live_trading_enabled ? "Pause automatiske kjøp" : "Start automatisk handel"}</button><button className="primary" onClick={() => void save()} disabled={saving || !loaded}>{saving ? "Lagrer …" : "Lagre innstillinger"}</button><button className="secondary" onClick={() => void resetDailyLoss()} disabled={saving || !loaded}>Reset dagstap</button></div>{message && <p className="inline-message">{message}</p>}
     </section>
     {isCompassInternalAuth && <><BullrunAlerts /><VetoControls event={lastEvent} /></>}
     <section className="panel best-setup-panel">
@@ -896,7 +858,7 @@ export default function TradingDashboard() {
       <p className="muted best-setup-intro">Long/spot og short/margin/futures rangeres samlet. En short kan derfor ligge foran en spot-mulighet når det bearish signalet er sterkere. Anbefalt giring er kun et manuelt forslag – boten endrer aldri giringen automatisk.</p>
       {bestSetups.length === 0 ? <p className="empty">Venter på ferske markedsdata.</p> : <div className="best-setup-grid">{bestSetups.map((setup, index) => {
         const amountKey = `${setup.symbol}:${setup.direction}`;
-        const active = priorityDirectives.find((item) => item.symbol === setup.symbol && item.direction === setup.direction);
+        const active = commandControls.commands.find((item) => item.action === "PRIORITY_OPEN" && item.symbol === setup.symbol && (item.mode === "SPOT" ? "LONG" : "SHORT") === setup.direction && ["pending", "processing"].includes(item.status));
         return <article className={`best-setup-card ${setup.direction.toLowerCase()}`} key={`${setup.symbol}-${setup.direction}`}>
           <div className="best-setup-rank">#{index + 1}</div>
           <div><span className={`setup-grade grade-${setup.grade.toLowerCase()}`}>{setup.grade}</span><strong>{setup.symbol}</strong></div>
@@ -907,11 +869,12 @@ export default function TradingDashboard() {
           <Sparkline points={marketHistory[setup.symbol] ?? []} hours={historyHours} />
           {isCompassInternalAuth && <VetoIndicators symbol={setup.symbol} event={lastEvent} direction={setup.direction} />}
           {setup.direction !== "VENT" && <div className="setup-amount"><small>Beløp ({settings.quote_asset}) · forslag {money(setup.suggested)}</small><input type="number" min={5} max={Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc))} step="1" value={setupAmounts[amountKey] ?? setup.suggested.toFixed(2)} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setSetupAmounts((current) => ({ ...current, [amountKey]: event.target.value }))} /></div>}
-          {setup.direction === "VENT" ? <div className="setup-eligibility">Ingen aktiv entry. Boten venter.</div> : active ? <div className="priority-active"><span className="priority-active-badge">PRIORITERT</span><button type="button" className="danger compact" disabled={priorityBusy === active.id} onClick={() => void stopPriority(active)}>{priorityBusy === active.id ? "Stopper …" : "Stopp prioritet"}</button></div> : !setup.canExecute ? <button type="button" className="secondary compact" disabled>Aktiver shorting for å gjennomføre</button> : <button type="button" className="primary compact" onClick={() => void prioritizeSetup(setup)}>Prioriter og gjennomfør</button>}
+          {setup.direction === "VENT" ? <div className="setup-eligibility">Ingen aktiv entry. Boten venter.</div> : active ? <div className="priority-active"><span className="priority-active-badge">PRIORITERT</span><button type="button" className="danger compact" disabled={commandControls.busy || active.status === "processing"} onClick={() => void commandControls.cancel(active)}>{active.status === "processing" ? "Behandles …" : "Stopp prioritet"}</button></div> : !setup.canExecute ? <button type="button" className="secondary compact" disabled>Aktiver shorting for å gjennomføre</button> : <button type="button" className="primary compact" disabled={!commandControls.ready || commandControls.busy} onClick={() => void prioritizeSetup(setup)}>Prioriter kjøp</button>}
         </article>;
       })}</div>}
-      <p className="muted best-setup-note">Direktivet sendes til boten og blir stående til det gjennomføres eller stoppes. Boten gjennomfører bare dersom samme signal fortsatt er gyldig og vanlige stop-loss-, dagstap-, kapital-, cooldown- og posisjonsgrenser fortsatt er oppfylt.</p>
+      <p className="muted best-setup-note">Kjøpsprioriteten gjelder i 15 minutter og fungerer også når automatiske kjøp er pauset. Den venter på et gyldig signal. Prioriterte kjøp hopper over automatikkens ventetid mellom handler; valgt kapitalgrense, ordrebeløp og dagstap gjelder fortsatt. Status og begrunnelse vises nedenfor.</p>
     </section>
+    <TradingCommandStatus />
     <section className="panel portfolio-panel"><div className="panel-head"><div><p className="eyebrow">PORTEFØLJE</p><h3>Investert per valuta</h3></div><div className="portfolio-view-controls"><span className="muted">Visning</span><label className="portfolio-switch"><span className={!portfolioListView ? "active" : ""}>Kort</span><button type="button" role="switch" aria-checked={portfolioListView} aria-label="Slå listevisning på eller av" className={`switch ${portfolioListView ? "on" : ""}`} onClick={() => setPortfolioListView((value) => !value)}><span /></button><span className={portfolioListView ? "active" : ""}>Liste</span></label></div></div>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
         <span style={{ padding: "6px 10px", borderRadius: 999, background: "rgba(34,197,94,.12)", border: "1px solid rgba(34,197,94,.32)", fontSize: 12 }}>SPOT · vanlig beholdning</span>
@@ -923,9 +886,9 @@ export default function TradingDashboard() {
           const resultValue = derivativeOpen ? (derivativeUnrealized ?? 0) : (unrealized ?? pnl);
           const spotStatus = resultValue > 0.00000001 ? "spot-gain" : resultValue < -0.00000001 ? "spot-loss" : "spot-neutral";
           const positionClass = derivativeOpen ? `derivative-${derivativeMode}` : spotStatus;
-          return <div className={`asset ${owned ? "invested " : ""}${positionClass}`} key={asset}><span className="coin">{asset[0]}</span><div><b><CoinLink asset={asset} label={`${asset}/${settings.quote_asset}`} /></b>{owned && <span className="owned-badge spot-badge">SPOT</span>}{derivativeOpen && <span className={`owned-badge ${derivativeMode === "futures" ? "futures-badge" : "margin-badge"}`}>{derivativeMode === "futures" ? `SHORT · FUTURES · ${derivativeLeverage ?? 1}x` : "SHORT · MARGIN"}</span>}<small>Kjøpt for (Spot): {money(invested)} {settings.quote_asset} · Verdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`} · Eier: {crypto(quantity)} {asset}</small>{derivativeOpen && <small style={{ fontWeight: 700 }}>Short åpnet for: {money(derivativeEntryValue)} {settings.quote_asset} · Verdi nå: {money(derivativeCurrentValue)} {settings.quote_asset} · {derivativeMode === "futures" ? `Futures ${derivativeLeverage ?? 1}x` : "Margin/lån"} · Urealisert: {derivativeUnrealized === null ? "–" : `${derivativeUnrealized >= 0 ? "+" : ""}${money(derivativeUnrealized)} ${settings.quote_asset}`}</small>}<small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`}</small><Sparkline points={marketHistory[`${asset}${settings.quote_asset}`] ?? []} hours={historyHours} />{isCompassInternalAuth && <VetoIndicators symbol={`${asset}${settings.quote_asset}`} event={lastEvent} direction={derivativeOpen ? "SHORT" : "LONG"} />}</div><span className={resultValue < 0 ? "loss" : "gain"}>{derivativeOpen ? `${resultValue >= 0 ? "+" : ""}${money(resultValue)} ${settings.quote_asset}` : unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>;
+          return <div className={`asset ${owned ? "invested " : ""}${positionClass}`} key={asset}><span className="coin">{asset[0]}</span><div><b><CoinLink asset={asset} label={`${asset}/${settings.quote_asset}`} /></b>{owned && <span className="owned-badge spot-badge">SPOT</span>}{derivativeOpen && <span className={`owned-badge ${derivativeMode === "futures" ? "futures-badge" : "margin-badge"}`}>{derivativeMode === "futures" ? `SHORT · FUTURES · ${derivativeLeverage ?? 1}x` : "SHORT · MARGIN"}</span>}<small>Kjøpt for (Spot): {money(invested)} {settings.quote_asset} · Verdi nå: {currentValue === null ? "–" : `${money(currentValue)} ${settings.quote_asset}`} · Eier: {crypto(quantity)} {asset}</small>{derivativeOpen && <small style={{ fontWeight: 700 }}>Short åpnet for: {money(derivativeEntryValue)} {settings.quote_asset} · Verdi nå: {money(derivativeCurrentValue)} {settings.quote_asset} · {derivativeMode === "futures" ? `Futures ${derivativeLeverage ?? 1}x` : "Margin/lån"} · Urealisert: {derivativeUnrealized === null ? "–" : `${derivativeUnrealized >= 0 ? "+" : ""}${money(derivativeUnrealized)} ${settings.quote_asset}`}</small>}<small>Nåpris: {currentPrice === null ? "–" : `${money(currentPrice)} ${settings.quote_asset}`}</small><Sparkline points={marketHistory[`${asset}${settings.quote_asset}`] ?? []} hours={historyHours} />{isCompassInternalAuth && <VetoIndicators symbol={`${asset}${settings.quote_asset}`} event={lastEvent} direction={derivativeOpen ? "SHORT" : "LONG"} />}<PositionActions symbol={`${asset}${settings.quote_asset}`} /></div><span className={resultValue < 0 ? "loss" : "gain"}>{derivativeOpen ? `${resultValue >= 0 ? "+" : ""}${money(resultValue)} ${settings.quote_asset}` : unrealized === null ? `${money(pnl)} ${settings.quote_asset}` : `${unrealized >= 0 ? "+" : ""}${money(unrealized)} ${settings.quote_asset}`}</span></div>;
         })}</div>
-      </> : <div className="portfolio-table-wrap"><table className="portfolio-table"><thead><tr>{PORTFOLIO_SORT_COLUMNS.map(({ key, label }) => <th key={key} aria-sort={portfolioSort.key === key ? portfolioSort.direction === "asc" ? "ascending" : "descending" : "none"}><button type="button" className="portfolio-sort-button" onClick={() => togglePortfolioSort(key)}>{label}<span>{portfolioSort.key === key ? portfolioSort.direction === "asc" ? "↑" : "↓" : "↕"}</span></button></th>)}</tr></thead><tbody>{sortedAllocations.map((allocation) => {
+      </> : <div className="portfolio-table-wrap"><table className="portfolio-table"><thead><tr>{PORTFOLIO_SORT_COLUMNS.map(({ key, label }) => <th key={key} aria-sort={portfolioSort.key === key ? portfolioSort.direction === "asc" ? "ascending" : "descending" : "none"}><button type="button" className="portfolio-sort-button" onClick={() => togglePortfolioSort(key)}>{label}<span>{portfolioSort.key === key ? portfolioSort.direction === "asc" ? "↑" : "↓" : "↕"}</span></button></th>)}<th>Handling</th></tr></thead><tbody>{sortedAllocations.map((allocation) => {
           const type = allocation.derivativeOpen ? allocation.derivativeMode === "futures" ? "FUTURES SHORT" : "MARGIN SHORT" : allocation.owned ? "SPOT" : "—";
           const investedValue = allocation.derivativeOpen ? Number(allocation.derivativeEntryValue ?? 0) : Number(allocation.invested ?? 0);
           const currentValue = allocation.derivativeOpen ? Number(allocation.derivativeCurrentValue ?? 0) : Number(allocation.currentValue ?? 0);
@@ -933,7 +896,7 @@ export default function TradingDashboard() {
           const quantityValue = allocation.derivativeOpen ? Number(allocation.derivativeQuantity ?? 0) : Number(allocation.quantity ?? 0);
           const status = allocation.derivativeOpen ? "Åpen short" : allocation.owned ? "Investert spot" : "Ikke investert";
           const resultClass = resultValue < 0 ? "loss" : "gain";
-          return <tr key={allocation.asset}><td><strong><CoinLink asset={allocation.asset} label={`${allocation.asset}/${settings.quote_asset}`} /></strong>{isCompassInternalAuth && <VetoIndicators symbol={`${allocation.asset}${settings.quote_asset}`} event={lastEvent} direction={allocation.derivativeOpen ? "SHORT" : "LONG"} />}</td><td><span className={`portfolio-type-badge ${allocation.derivativeOpen ? allocation.derivativeMode : allocation.owned ? "spot" : "none"}`}>{type}</span></td><td>{money(investedValue)} {settings.quote_asset}</td><td>{money(currentValue)} {settings.quote_asset}</td><td className={resultClass}>{resultValue >= 0 ? "+" : ""}{money(resultValue)} {settings.quote_asset}</td><td>{crypto(quantityValue)} {allocation.asset}</td><td>{allocation.currentPrice === null ? "–" : money(Number(allocation.currentPrice))}</td><td>{allocation.derivativeOpen ? `${allocation.derivativeLeverage ?? 1}x` : "1x"}</td><td><span className={`portfolio-status ${allocation.derivativeOpen ? "short" : allocation.owned ? "owned" : "empty"}`}>{status}</span></td></tr>;
+          return <tr key={allocation.asset}><td><strong><CoinLink asset={allocation.asset} label={`${allocation.asset}/${settings.quote_asset}`} /></strong>{isCompassInternalAuth && <VetoIndicators symbol={`${allocation.asset}${settings.quote_asset}`} event={lastEvent} direction={allocation.derivativeOpen ? "SHORT" : "LONG"} />}</td><td><span className={`portfolio-type-badge ${allocation.derivativeOpen ? allocation.derivativeMode : allocation.owned ? "spot" : "none"}`}>{type}</span></td><td>{money(investedValue)} {settings.quote_asset}</td><td>{money(currentValue)} {settings.quote_asset}</td><td className={resultClass}>{resultValue >= 0 ? "+" : ""}{money(resultValue)} {settings.quote_asset}</td><td>{crypto(quantityValue)} {allocation.asset}</td><td>{allocation.currentPrice === null ? "–" : money(Number(allocation.currentPrice))}</td><td>{allocation.derivativeOpen ? `${allocation.derivativeLeverage ?? 1}x` : "1x"}</td><td><span className={`portfolio-status ${allocation.derivativeOpen ? "short" : allocation.owned ? "owned" : "empty"}`}>{status}</span></td><td><PositionActions symbol={`${allocation.asset}${settings.quote_asset}`} /></td></tr>;
         })}</tbody></table></div>}
       <p className="muted portfolio-help">Klikk på en kolonneoverskrift for å sortere. Klikk én gang til for motsatt rekkefølge. Grønn = positivt resultat. Rød = negativt resultat. Lilla = Margin-short. Oransje = Futures-short.</p>
     </section>

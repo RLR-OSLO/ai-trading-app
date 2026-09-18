@@ -239,7 +239,7 @@ class PortfolioLiveTests(unittest.TestCase):
         })
         self.assertEqual(limits.max_open_positions, 3)
         self.assertEqual(limits.cooldown_seconds, 90)
-        self.assertEqual(limits.max_trades_per_day, 36)
+        self.assertEqual(limits.max_trades_per_day, 0)
 
 
 if __name__ == "__main__":

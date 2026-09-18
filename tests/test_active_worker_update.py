@@ -120,8 +120,8 @@ def event(uid, kind, message="", stamp="2026-09-18T14:30:00+00:00"):
 
 
 def test_health_requires_both_accounts_new_engine_and_completed_live_cycle():
-    rows = [event("owner", "heartbeat", "engine=execution-integrity-v4;recovery_locked=True"),
-            event("second", "heartbeat", "engine=execution-integrity-v4;recovery_locked=False")]
+    rows = [event("owner", "heartbeat", "engine=user-commands-v5;recovery_locked=True"),
+            event("second", "heartbeat", "engine=user-commands-v5;recovery_locked=False")]
     expected = {"owner": False, "second": True}
     assert not update.health_ready(rows, expected)
     rows.append(event("second", "cycle_status", "spot=paused_trade_limit;short=short_disabled"))
@@ -134,7 +134,7 @@ def test_health_requires_both_accounts_new_engine_and_completed_live_cycle():
 
 def test_old_heartbeat_or_changed_authorization_cannot_pass_health():
     assert not update.health_ready([event("owner", "heartbeat", "engine=exit-guard-v3;recovery_locked=True")], {"owner": False})
-    assert not update.health_ready([event("owner", "heartbeat", "engine=execution-integrity-v4;recovery_locked=False")], {"owner": False})
+    assert not update.health_ready([event("owner", "heartbeat", "engine=user-commands-v5;recovery_locked=False")], {"owner": False})
     assert not update.health_ready([], {})
 
 

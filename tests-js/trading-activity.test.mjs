@@ -11,6 +11,11 @@ test('stale heartbeat never claims engine is live', () => {
 test('recovery lock is explained even when signals exist', () => {
   assert.equal(engineSummary({ ...heartbeat, message: 'live=False;recovery_locked=True;signals=BTCUSDC' }, [], now, true, true).label, 'Kun overvåking');
 });
+test('updated engine explains independent manual controls when automation is off', () => {
+  const summary = engineSummary({ ...heartbeat, message: 'live=False;recovery_locked=True;user_commands=ready' }, [], now, false, false);
+  assert.equal(summary.label, 'Automatikk avslått');
+  assert.match(summary.detail, /selge og prioritere kjøp/);
+});
 test('an error newer than heartbeat is visible', () => {
   const event = { ...heartbeat, id: 2, event_type: 'trading_cycle_error', level: 'error', message: 'quoteOrderQty error', created_at: '2026-01-01T11:59:40Z' };
   assert.equal(engineSummary(heartbeat, [event], now, true, true).label, 'Feil i siste kontroll');

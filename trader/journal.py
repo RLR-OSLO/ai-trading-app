@@ -26,6 +26,20 @@ def flush_reports(state, path, save, report_trade) -> bool:
 
 
 def checkpoint_trade(state, path, save, report_trade, payload) -> None:
+    command = getattr(state, "active_command", None)
+    if command:
+        if command["action"] == "PRIORITY_OPEN":
+            positions = getattr(state, "positions", None) or [getattr(state, "position", None)]
+            for position in positions:
+                if position and position.symbol == payload["symbol"]:
+                    position.user_managed = True
+        # The command receipt and actual fill are committed with the position.
+        # A lost HTTP reply can therefore never cause this command to trade twice.
+        state.command_receipts[str(command["id"])] = {
+            "status": "executed",
+            "result": f"{payload['side']} {payload['quantity']} {payload['symbol']}; bekreftet av Binance",
+        }
+        state.active_command = None
     if report_trade is not None:
         state.pending_reports.append({
             **payload,
