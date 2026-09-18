@@ -36,6 +36,21 @@ class ReportingTests(unittest.TestCase):
         self.assertTrue(settings["live_trading_enabled"])
         self.assertIn("user_id=eq.user-id", request.full_url)
 
+    @patch("urllib.request.urlopen")
+    def test_compass_report_retry_is_idempotent_and_keeps_owner(self, urlopen):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        urlopen.return_value = response
+        reporter = SupabaseReporter("https://nsqsqupucxgrkwotegof.supabase.co", "sb_secret_test", "user-a")
+        payload = {"symbol": "BTCUSDC", "side": "BUY", "execution_key": "execution-1", "user_id": "user-b"}
+        reporter.record_trade(payload)
+        reporter.record_trade(payload)
+        first, second = [call.args[0] for call in urlopen.call_args_list]
+        self.assertEqual(first.data, second.data)
+        self.assertIn("on_conflict=user_id%2Cexecution_key", first.full_url)
+        self.assertIn("ignore-duplicates", first.headers["Prefer"])
+        self.assertEqual(json.loads(first.data)["user_id"], "user-a")
+
 
 if __name__ == "__main__":
     unittest.main()

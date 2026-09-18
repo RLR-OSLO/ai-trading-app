@@ -12,7 +12,7 @@ class C:
     def account(self): return {"balances":[{"asset":"DOT","free":"10","locked":"0"},{"asset":"USDC","free":"100","locked":"0"}]}
     def ticker_price(self,s): return self.price
     def symbol_info(self,s): return {"filters":[{"filterType":"LOT_SIZE","stepSize":"0.01"},{"filterType":"PRICE_FILTER","tickSize":"0.01"}]}
-    def place_spot_order(self,**k): self.sells+=1; return {"cummulativeQuoteQty":"900"}
+    def place_spot_order(self,**k): self.sells+=1; return {"status":"FILLED", "executedQty":str(k["quantity"]), "cummulativeQuoteQty":"900"}
     def cancel_order_list(self,**k): self.cancelled+=1; return {}
     def open_orders(self,**k): return []
 

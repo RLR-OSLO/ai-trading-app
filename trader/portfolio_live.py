@@ -4,13 +4,14 @@ import json
 import os
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Any, Callable
 
 from .binance import BinanceError, BinanceSpotClient
+from .journal import checkpoint_trade, flush_reports
 
 PROFILE_LIMITS = {
     "low": (6, 1800, 1),
@@ -66,6 +67,7 @@ class PortfolioState:
     pending_target_fraction: str | None = None
     pending_max_hold_seconds: int | None = None
     reentry_blocks: dict[str, dict[str, Any]] | None = None
+    pending_reports: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.positions is None:
@@ -180,6 +182,7 @@ def load_state(path: Path) -> PortfolioState:
         raw.get("pending_target_fraction"),
         int(raw["pending_max_hold_seconds"]) if raw.get("pending_max_hold_seconds") is not None else None,
         raw.get("reentry_blocks", {}),
+        raw.get("pending_reports", []),
     )
     if state.day != _today():
         state.day, state.realized_pnl, state.trades_today = _today(), "0", 0
@@ -266,7 +269,9 @@ def _finalize_sell(state, path, position, quantity, received, limits, report_tra
     if quantity <= 0 or received <= 0:
         raise BinanceError("Sell execution returned invalid quantity or proceeds")
     position_quantity = Decimal(position.quantity)
-    sold_quantity = min(quantity, position_quantity)
+    sold_quantity = quantity
+    if sold_quantity > position_quantity:
+        raise BinanceError("Sell execution exceeded the tracked position")
     if sold_quantity <= 0 or position_quantity <= 0:
         raise BinanceError("Sell execution exceeded the tracked position")
     cost_per_unit = Decimal(position.quote_spent) / position_quantity
@@ -288,9 +293,8 @@ def _finalize_sell(state, path, position, quantity, received, limits, report_tra
         "until": int(time.time()) + (LOSS_REENTRY_SECONDS if pnl < 0 else EXIT_REENTRY_SECONDS),
         "signal_reset": False,
     }
-    save_state(path, state)
-    if report_trade:
-        report_trade({"symbol": position.symbol, "side": "SELL", "quantity": str(sold_quantity),
+    checkpoint_trade(state, path, save_state, report_trade,
+                     {"symbol": position.symbol, "side": "SELL", "quantity": str(sold_quantity),
                       "entry_price": position.entry_price, "exit_price": str(received / sold_quantity), "pnl": str(pnl)})
     return f"sold:{position.symbol}:pnl={pnl};strategy={position.strategy}"
 
@@ -493,10 +497,10 @@ def _reconcile(client, state, path, quote, limits, report_trade):
     status = str(order.get("status", ""))
     if status not in {"FILLED", "CANCELED", "EXPIRED", "REJECTED"}:
         return f"pending_exchange_order:{side}:{status or 'UNKNOWN'}"
-    if status != "FILLED":
-        _clear_pending(state); save_state(path, state); return f"reconciled_{status.lower()}:{side}:{symbol}"
     executed = Decimal(str(order.get("executedQty", "0")))
     quote_qty = Decimal(str(order.get("cummulativeQuoteQty", "0")))
+    if status != "FILLED" and executed == 0:
+        _clear_pending(state); save_state(path, state); return f"reconciled_{status.lower()}:{side}:{symbol}"
     now = int(time.time())
     if side == "BUY":
         if executed <= 0 or quote_qty <= 0:
@@ -512,9 +516,9 @@ def _reconcile(client, state, path, quote, limits, report_trade):
             ))
         state.trades_today += 1
         strategy = state.pending_strategy
-        _clear_pending(state); save_state(path, state)
-        if report_trade:
-            report_trade({"symbol": symbol, "side": "BUY", "quantity": str(quantity),
+        _clear_pending(state)
+        checkpoint_trade(state, path, save_state, report_trade,
+                         {"symbol": symbol, "side": "BUY", "quantity": str(quantity),
                           "entry_price": str(quote_qty / executed), "exit_price": None, "pnl": None})
         return f"reconciled_buy:{symbol};strategy={strategy}"
     if side == "SELL":
@@ -549,7 +553,10 @@ def _market_sell(client, state, state_path, position, limits, report_trade, now:
     save_state(state_path, state)
     order = client.place_spot_order(symbol=position.symbol, side="SELL", order_type="MARKET", quantity=quantity,
                                     live_trading_enabled=True, client_order_id=client_id)
-    result = _finalize_sell(state, state_path, position, quantity,
+    if order.get("status") not in {"FILLED", "CANCELED", "EXPIRED", "REJECTED"}:
+        return f"pending_exchange_order:SELL:{order.get('status', 'UNKNOWN')}"
+    executed = Decimal(str(order.get("executedQty", "0")))
+    result = _finalize_sell(state, state_path, position, executed,
                             Decimal(str(order.get("cummulativeQuoteQty", "0"))), limits, report_trade)
     return f"{result};reason={reason}"
 
@@ -568,10 +575,14 @@ def run_portfolio_cycle(
     entry_target_fractions: dict[str, Decimal] | None = None,
     entry_size_multipliers: dict[str, Decimal] | None = None,
     entry_max_hold_seconds: dict[str, int] | None = None,
+    other_realized_pnl: Decimal = Decimal("0"),
+    other_open_notional: Decimal = Decimal("0"),
+    blocked_symbols: frozenset[str] = frozenset(),
 ) -> str:
     state = load_state(state_path)
     now = int(time.time())
     quote = quote_asset.upper()
+    flush_reports(state, state_path, save_state, report_trade)
     reconciled = _reconcile(client, state, state_path, quote, limits, report_trade)
     if reconciled:
         return reconciled
@@ -701,7 +712,9 @@ def run_portfolio_cycle(
 
     if not allow_new_entries:
         return "paused_new_entries" if not notes else ";".join(notes)
-    if Decimal(state.realized_pnl) <= -limits.daily_loss:
+    if state.pending_reports:
+        return "paused_reporting_backlog"
+    if Decimal(state.realized_pnl) + other_realized_pnl <= -limits.daily_loss:
         return "paused_daily_loss"
     if state.trades_today >= limits.max_trades_per_day:
         return "paused_trade_limit"
@@ -712,7 +725,8 @@ def run_portfolio_cycle(
 
     open_symbols = {p.symbol for p in state.positions or []}
     candidates = [symbol for symbol, active in signals.items()
-                  if active and symbol not in open_symbols and symbol not in state.reentry_blocks]
+                  if active and symbol not in open_symbols and symbol not in state.reentry_blocks
+                  and symbol not in blocked_symbols]
     if not candidates:
         return ";".join(notes) if notes else "no_signal"
     free_quote = _free_balance(client, quote)
@@ -732,7 +746,7 @@ def run_portfolio_cycle(
 
     multiplier = max(Decimal("0.25"), min(Decimal("1"), Decimal(str((entry_size_multipliers or {}).get(symbol, Decimal("0.5"))))))
     open_notional = sum((Decimal(p.quote_spent) for p in state.positions or []), Decimal("0"))
-    remaining_cap = max(Decimal("0"), limits.capital_cap - open_notional)
+    remaining_cap = max(Decimal("0"), limits.capital_cap - open_notional - max(Decimal("0"), other_open_notional))
     # order_size is a hard maximum per position. Signal quality chooses a smaller
     # amount when conviction is weaker, but can use the full maximum on the best setups.
     spend = min(limits.order_size * multiplier, free_quote, remaining_cap)
@@ -752,6 +766,8 @@ def run_portfolio_cycle(
     save_state(state_path, state)
 
     order = client.market_buy_by_quote(symbol=symbol, quote_quantity=spend, live_trading_enabled=True, client_order_id=client_id)
+    if order.get("status") not in {"FILLED", "CANCELED", "EXPIRED", "REJECTED"}:
+        return f"pending_exchange_order:BUY:{order.get('status', 'UNKNOWN')}"
     spent = Decimal(str(order.get("cummulativeQuoteQty", "0")))
     executed = Decimal(str(order.get("executedQty", "0")))
     if spent <= 0 or executed <= 0:
@@ -768,9 +784,8 @@ def run_portfolio_cycle(
     _clear_pending(state)
     state.trades_today += 1
     state.cooldown_until = now + limits.cooldown_seconds
-    save_state(state_path, state)
-    if report_trade:
-        report_trade({"symbol": symbol, "side": "BUY", "quantity": str(net), "entry_price": str(entry), "exit_price": None, "pnl": None})
+    checkpoint_trade(state, state_path, save_state, report_trade,
+                     {"symbol": symbol, "side": "BUY", "quantity": str(net), "entry_price": str(entry), "exit_price": None, "pnl": None})
 
     if _protection_enabled():
         hard_stop = entry * (Decimal("1") - stop_fraction)

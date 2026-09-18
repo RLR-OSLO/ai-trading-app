@@ -12,3 +12,5 @@ dist/
 build/
 node_modules/
 .next/
+*.tsbuildinfo
+supabase/.temp/
