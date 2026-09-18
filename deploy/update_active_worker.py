@@ -24,12 +24,12 @@ import urllib.request
 REPO = "https://github.com/RLR-OSLO/ai-trading-app.git"
 COMPASS = "https://nsqsqupucxgrkwotegof.supabase.co"
 SERVICE = "ai-trading-app"
-ENGINE = "execution-integrity-v4"
+ENGINE = "user-commands-v5"
 ENV_FILE = Path("/etc/ai-trading-app.env")
 STATE_ROOT = Path("/var/lib/ai-trading-app")
 OVERRIDE = Path("/etc/systemd/system/ai-trading-app.service.d/40-compass.conf")
 SETTINGS_QUERY = "/rest/v1/bot_settings?select=*&order=user_id"
-PENDING_FIELDS = ("pending_action", "pending_client_order_id", "pending_open", "pending_close_id", "pending_reports")
+PENDING_FIELDS = ("pending_action", "pending_client_order_id", "pending_open", "pending_close_id", "pending_reports", "active_command")
 
 
 class Stop(RuntimeError):
@@ -215,6 +215,8 @@ def main() -> None:
         settings = api_read(SETTINGS_QUERY, key)
         require_unchanged_settings(settings, settings)
         api_read("/rest/v1/trades?select=execution_key&limit=0", key)
+        api_read("/rest/v1/trading_commands?select=id,status&limit=0", key)
+        api_read("/rest/v1/trading_position_snapshots?select=user_id,engine&limit=0", key)
         since = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
         query = urllib.parse.urlencode({"select": "user_id", "event_type": "eq.heartbeat", "created_at": "gte." + since})
         recent = {row["user_id"] for row in api_read("/rest/v1/bot_events?" + query, key)}
@@ -275,6 +277,7 @@ def main() -> None:
                 if property_value("WorkingDirectory") != str(stage):
                     raise Stop("Tjenestens kodemappe er endret")
                 print("WORKER_READY " + args.revision, flush=True)
+                print("Aktiv kodemappe: " + str(stage), flush=True)
                 print(f"Motor={ENGINE}; kontoer={len(expected)}; eksisterende innstillinger og tilstand bevart.", flush=True)
                 print("Tilstand: " + json.dumps(state_summary(read_states(STATE_ROOT))), flush=True)
                 return

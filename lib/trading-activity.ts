@@ -70,6 +70,8 @@ export function engineSummary(heartbeat: ActivityEvent | null, events: ActivityE
   const age = now - Date.parse(heartbeat.created_at);
   if (!Number.isFinite(age) || age > 180_000) return { label: "Utdatert motorstatus", detail: "Siste rapport er over tre minutter gammel. Handelsstatus kan ikke bekreftes.", tone: "warning" };
   const fields = eventFields(heartbeat.message);
+  if (fields.recovery_locked === "True" && fields.user_commands === "ready") return {
+    label: "Automatikk avslått", detail: "Du kan selge og prioritere kjøp fra posisjonene nedenfor. Velg Start automatisk handel for løpende automatiske kjøp og salg.", tone: "neutral" };
   if (fields.recovery_locked === "True") return { label: "Kun overvåking", detail: "Handel er ikke aktivert etter gjenopprettingen. Serveren sender status.", tone: "warning" };
   const failure = events.find((event) => event.level === "error" && Date.parse(event.created_at) >= Date.parse(heartbeat.created_at));
   if (failure) return { label: "Feil i siste kontroll", detail: activityDescription(failure), tone: "warning" };

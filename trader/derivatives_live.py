@@ -41,6 +41,7 @@ class ShortPosition:
     trough_price: str | None = None
     trailing_active: bool = False
     trailing_stop_price: str | None = None
+    user_managed: bool = False
 
 
 @dataclass
@@ -53,6 +54,8 @@ class DerivativesState:
     pending_reports: list[dict[str, Any]] = field(default_factory=list)
     pending_close_id: str | None = None
     pending_open: dict[str, Any] | None = None
+    active_command: dict[str, Any] | None = None
+    command_receipts: dict[str, Any] = field(default_factory=dict)
 
 
 def _today() -> str:
@@ -73,6 +76,8 @@ def load_state(path: Path) -> DerivativesState:
         pending_reports=raw.get("pending_reports", []),
         pending_close_id=raw.get("pending_close_id"),
         pending_open=raw.get("pending_open"),
+        active_command=raw.get("active_command"),
+        command_receipts=raw.get("command_receipts", {}),
     )
     if state.day != _today():
         state.day = _today()
@@ -250,6 +255,7 @@ def _close_margin(
     path: Path,
     reason: str,
     report_trade: Callable[[dict[str, Any]], None] | None,
+    maximum_quantity: Decimal | None = None,
 ) -> str:
     position = state.position
     if position is None:
@@ -260,6 +266,8 @@ def _close_margin(
         except BinanceError:
             pass
     qty = Decimal(position.quantity)
+    if maximum_quantity is not None:
+        qty = min(qty, maximum_quantity)
     state.pending_close_id = f"ait-mc-{uuid4().hex[:24]}"
     save_state(path, state)
     order = client.market_order(
@@ -304,6 +312,7 @@ def _close_futures(
     path: Path,
     reason: str,
     report_trade: Callable[[dict[str, Any]], None] | None,
+    maximum_quantity: Decimal | None = None,
 ) -> str:
     position = state.position
     if position is None:
@@ -314,6 +323,8 @@ def _close_futures(
         except BinanceError:
             pass
     qty = Decimal(position.quantity)
+    if maximum_quantity is not None:
+        qty = min(qty, maximum_quantity)
     state.pending_close_id = f"ait-fc-{uuid4().hex[:24]}"
     save_state(path, state)
     order = client.market_order(symbol=position.symbol, side="BUY", quantity=qty, live_trading_enabled=True, reduce_only=True, client_order_id=state.pending_close_id)
@@ -358,6 +369,7 @@ def run_short_cycle(
     requested_notional: Decimal | None = None,
     spot_open_notional: Decimal = Decimal("0"),
     spot_open_symbols: frozenset[str] = frozenset(),
+    user_priority: bool = False,
 ) -> str:
     state = load_state(state_path)
     flush_reports(state, state_path, save_state, report_trade)
@@ -430,7 +442,7 @@ def run_short_cycle(
         return "short_reporting_backlog"
     if not bool(settings.get("short_enabled")):
         return "short_disabled"
-    if int(time.time()) < state.cooldown_until:
+    if not user_priority and int(time.time()) < state.cooldown_until:
         return "short_cooldown"
 
     candidates = [symbol for symbol, active in short_signals.items() if active and symbol not in spot_open_symbols]

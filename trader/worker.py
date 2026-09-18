@@ -18,6 +18,7 @@ from .portfolio_live import PortfolioLimits, recover_positions_from_trade_histor
 from .learning import learning_factors, factor_for
 from .reporting import SupabaseReporter
 from .scalping import ScalpAnalysis, analyze_scalp
+from .commands import process_commands, position_snapshot
 
 
 LOG = logging.getLogger("ai_trader")
@@ -374,9 +375,11 @@ def protect_existing_positions(client, reporter, settings, state_path, derivativ
     """Run existing exits before news/candle/history dependencies, without entries.
 
     Spot and short checks are independent so one venue error cannot skip the
-    other. The existing recovery authorization gate remains authoritative.
+    other. A confirmed manual entry authorizes exits for that position only;
+    recovered positions still require the user's explicit activation or close.
     """
-    if recovery_execution_blocked(reporter, settings) or client.credentials is None:
+    locked = recovery_execution_blocked(reporter, settings)
+    if client.credentials is None:
         return False
     runtime = dict(settings or {})
     profile = str(runtime.get("risk_profile") or "normal").lower()
@@ -387,14 +390,24 @@ def protect_existing_positions(client, reporter, settings, state_path, derivativ
         try:
             if mode == "spot":
                 state = load_state(state_path)
+                if state.active_command:
+                    ready = False
+                    continue
+                if locked and not any(p.user_managed for p in state.positions):
+                    continue
                 if not (state.positions or state.pending_action or state.pending_reports):
                     continue
                 result = run_portfolio_cycle(client, {}, state_path,
                     PortfolioLimits.from_settings(runtime) if settings else PortfolioLimits.from_env(),
                     reporter.record_trade if reporter else None,
-                    allow_new_entries=False, quote_asset=quote)
+                    allow_new_entries=False, quote_asset=quote, authorized_only=locked)
             else:
                 state = load_derivatives_state(derivatives_path)
+                if state.active_command:
+                    ready = False
+                    continue
+                if locked and not (state.position and state.position.user_managed):
+                    continue
                 if not (state.position or state.pending_open or state.pending_close_id or state.pending_reports):
                     continue
                 result = run_short_cycle(client.credentials, {}, {}, runtime, derivatives_path,
@@ -411,7 +424,7 @@ def protect_existing_positions(client, reporter, settings, state_path, derivativ
                     reporter.record_event("trading_cycle_error", f"{mode} position protection check failed; new entries paused", "error")
                 except Exception:
                     LOG.warning("Unable to report protection check failure")
-    return ready
+    return ready and not locked
 
 
 def main() -> None:
@@ -450,6 +463,14 @@ def main() -> None:
                     LOG.exception("daily loss reset request failed")
             quote_asset = str((settings or {}).get("quote_asset") or os.getenv("TRADING_QUOTE_ASSET", "USDC")).upper()
             risk_profile = str((settings or {}).get("risk_profile") or "normal").lower()
+            # Confirmed user commands have their own MFA-scoped authorization;
+            # pausing automatic entries must not disable a requested close.
+            manual_busy = master_live and process_commands(client, reporter, settings, state_path, derivatives_path)
+            if reporter and reporter.is_compass:
+                try:
+                    reporter.publish_positions(position_snapshot(state_path, derivatives_path), enabled=master_live and client.credentials is not None)
+                except Exception:
+                    LOG.exception("Position snapshot could not be published")
             protection_ready = protect_existing_positions(client, reporter, settings, state_path, derivatives_path)
             authenticated = readiness_check(client)
             pairs = active_pairs(client, quote_asset)
@@ -478,6 +499,9 @@ def main() -> None:
                 risk_profile,
                 veto_overrides=settings if reporter and reporter.is_compass else None,
             )
+            if master_live and not manual_busy:
+                manual_busy = process_commands(client, reporter, settings, state_path, derivatives_path,
+                    signals=signals, short_signals=short_signals)
             signal_text = ",".join(
                 f"{pair}:{strategies[pair]}" for pair, signal in signals.items() if signal
             ) or "none"
@@ -497,7 +521,7 @@ def main() -> None:
                 bool(settings.get("bot_enabled")) and bool(settings.get("live_trading_enabled"))
                 if settings is not None else reporter is None
             )
-            allow_new_entries = master_live and dashboard_live and not recovery_locked and protection_ready
+            allow_new_entries = master_live and dashboard_live and not recovery_locked and protection_ready and not manual_busy
             if reporter and settings is not None and not recovery_locked:
                 reporter.expire_stale_directives()
             directive = reporter.get_pending_directive() if reporter and settings is not None and not recovery_locked else None
@@ -547,7 +571,7 @@ def main() -> None:
                 account_total = spot_total + futures_total
                 reporter.record_event(
                     "heartbeat",
-                    f"engine=execution-integrity-v4;recovery_locked={recovery_locked};live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
+                    f"engine=user-commands-v5;user_commands={'ready' if master_live and client.credentials is not None else 'disabled'};recovery_locked={recovery_locked};live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
                     f"signals={signal_text};scores={score_text};scalp_scores={scalp_score_text};short_scores={short_score_text};"
                     f"prices={price_text};balances={balances_text};wallet_values={wallet_value_text};wallets={wallet_breakdown_text};account_total={account_total};spot_total={spot_total};spot_available={available_balance};futures_total={futures_total};futures_available={futures_available};invested_value={invested_value};markets={','.join(pairs)};"
                     f"best={best_pair}:{strategies[best_pair]}:{analyses[best_pair].score}/{scalp_analyses[best_pair].score};"
@@ -555,8 +579,8 @@ def main() -> None:
                 )
                 last_heartbeat = time.time()
 
-            if recovery_locked:
-                LOG.info("Compass recovery: reporting only; no state updates or orders")
+            if recovery_locked or manual_busy:
+                LOG.info("Automatic orders paused; user commands processed separately")
                 time.sleep(int(os.getenv("WORKER_INTERVAL_SECONDS", "30")))
                 continue
 

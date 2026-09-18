@@ -56,3 +56,9 @@
 .activity-error { color: #ffbd86; }
 #trade-history { scroll-margin-top: 20px; }
 @media(max-width: 640px) { .activity-facts { grid-template-columns: 1fr; gap: 14px; } }
+
+.position-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.position-actions small, .command-list small { display: block; font-size: 12px; margin-top: 4px; }
+.command-list { padding: 0; list-style: none; }
+.command-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 14px 0; border-top: 1px solid rgba(148,163,184,.18); }
+.command-list li > div { flex: 1; min-width: 180px; }
