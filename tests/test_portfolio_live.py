@@ -29,7 +29,7 @@ class FakeClient:
 
     def market_buy_by_quote(self, **_kwargs):
         self.live_buys += 1
-        return {"executedQty": "0.25", "cummulativeQuoteQty": "25", "fills": []}
+        return {"status": "FILLED", "executedQty": "0.25", "cummulativeQuoteQty": "25", "fills": []}
 
     def ticker_price(self, _symbol):
         return self.price
@@ -58,7 +58,7 @@ class FakeClient:
 
     def place_spot_order(self, **_kwargs):
         self.live_sells += 1
-        return {"cummulativeQuoteQty": "25.10"}
+        return {"status": "FILLED", "executedQty": str(_kwargs["quantity"]), "cummulativeQuoteQty": "25.10"}
 
 
 class PortfolioLiveTests(unittest.TestCase):

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .analysis import MarketAnalysis, analyze_market, bullish_btc_regime
 from .directional import BearishAnalysis, analyze_bearish_market
-from .derivatives_live import run_short_cycle
+from .derivatives_live import run_short_cycle, load_state as load_derivatives_state
 from .derivatives import BinanceFuturesClient
 from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
 from .config import DEFAULT_CONFIG
@@ -281,8 +281,14 @@ def market_scan(
         for pair in pairs
     }
 
-    btc_pair = next((pair for pair in pairs if pair.startswith("BTC")), pairs[0])
-    btc_regime = bullish_btc_regime(swing_frames[btc_pair])
+    btc_pair = next((pair for pair in pairs if pair.startswith("BTC")), None)
+    if btc_pair is None:
+        quote = "USDC" if pairs[0].endswith("USDC") else "USDT"
+        btc_frames = {interval: client.klines(f"BTC{quote}", interval, limit=101)[:-1]
+                      for interval in ("1h", "4h")}
+    else:
+        btc_frames = swing_frames[btc_pair]
+    btc_regime = bullish_btc_regime(btc_frames)
     news = news_monitor.score()
     analyses = {pair: analyze_market(data, veto_overrides) for pair, data in swing_frames.items()}
     bearish_analyses = {pair: analyze_bearish_market(data) for pair, data in swing_frames.items()}
@@ -364,6 +370,50 @@ def recovery_execution_blocked(reporter, settings) -> bool:
     return bool(reporter and reporter.is_compass and (settings or {}).get("execution_authorized") is not True)
 
 
+def protect_existing_positions(client, reporter, settings, state_path, derivatives_path) -> bool:
+    """Run existing exits before news/candle/history dependencies, without entries.
+
+    Spot and short checks are independent so one venue error cannot skip the
+    other. The existing recovery authorization gate remains authoritative.
+    """
+    if recovery_execution_blocked(reporter, settings) or client.credentials is None:
+        return False
+    runtime = dict(settings or {})
+    profile = str(runtime.get("risk_profile") or "normal").lower()
+    runtime["stop_loss_percent"], runtime["take_profit_percent"] = PROTECTION_DEFAULTS.get(profile, PROTECTION_DEFAULTS["normal"])
+    quote = str(runtime.get("quote_asset") or os.getenv("TRADING_QUOTE_ASSET", "USDC")).upper()
+    ready = True
+    for mode in ("spot", "short"):
+        try:
+            if mode == "spot":
+                state = load_state(state_path)
+                if not (state.positions or state.pending_action or state.pending_reports):
+                    continue
+                result = run_portfolio_cycle(client, {}, state_path,
+                    PortfolioLimits.from_settings(runtime) if settings else PortfolioLimits.from_env(),
+                    reporter.record_trade if reporter else None,
+                    allow_new_entries=False, quote_asset=quote)
+            else:
+                state = load_derivatives_state(derivatives_path)
+                if not (state.position or state.pending_open or state.pending_close_id or state.pending_reports):
+                    continue
+                result = run_short_cycle(client.credentials, {}, {}, runtime, derivatives_path,
+                    reporter.record_trade if reporter else None, allow_new_entries=False)
+            if "reconciliation_required" in result or "pending_" in result:
+                ready = False
+            if reporter and (result.startswith(("sold:", "reconciled_buy:")) or "_short_closed:" in result or "_short_opened:" in result):
+                reporter.record_event(f"{mode}_execution", result)
+        except Exception:
+            ready = False
+            LOG.exception("%s position protection check failed", mode)
+            if reporter:
+                try:
+                    reporter.record_event("trading_cycle_error", f"{mode} position protection check failed; new entries paused", "error")
+                except Exception:
+                    LOG.warning("Unable to report protection check failure")
+    return ready
+
+
 def main() -> None:
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO"),
@@ -374,7 +424,10 @@ def main() -> None:
     news_monitor = NewsMonitor()
     master_live = _bool_env("LIVE_TRADING_ENABLED")
     state_path = Path(os.getenv("LIVE_STATE_PATH", "/var/lib/ai-trading-app/live-state.json"))
+    derivatives_path = Path(os.getenv("DERIVATIVES_STATE_PATH", "/var/lib/ai-trading-app/derivatives-state.json"))
     last_heartbeat = 0.0
+    last_cycle_status = ""
+    last_cycle_report = 0.0
     LOG.info("worker starting; master_live=%s; scalping=1m/5m", master_live)
 
     while True:
@@ -397,6 +450,7 @@ def main() -> None:
                     LOG.exception("daily loss reset request failed")
             quote_asset = str((settings or {}).get("quote_asset") or os.getenv("TRADING_QUOTE_ASSET", "USDC")).upper()
             risk_profile = str((settings or {}).get("risk_profile") or "normal").lower()
+            protection_ready = protect_existing_positions(client, reporter, settings, state_path, derivatives_path)
             authenticated = readiness_check(client)
             pairs = active_pairs(client, quote_asset)
             available_balance = free_quote_balance(client, quote_asset) if authenticated else Decimal("0")
@@ -443,7 +497,9 @@ def main() -> None:
                 bool(settings.get("bot_enabled")) and bool(settings.get("live_trading_enabled"))
                 if settings is not None else reporter is None
             )
-            allow_new_entries = master_live and dashboard_live and not recovery_locked
+            allow_new_entries = master_live and dashboard_live and not recovery_locked and protection_ready
+            if reporter and settings is not None and not recovery_locked:
+                reporter.expire_stale_directives()
             directive = reporter.get_pending_directive() if reporter and settings is not None and not recovery_locked else None
             directive_symbol = str((directive or {}).get("symbol") or "")
             directive_direction = str((directive or {}).get("direction") or "")
@@ -491,7 +547,7 @@ def main() -> None:
                 account_total = spot_total + futures_total
                 reporter.record_event(
                     "heartbeat",
-                    f"engine=exit-guard-v3;recovery_locked={recovery_locked};live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
+                    f"engine=execution-integrity-v4;recovery_locked={recovery_locked};live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
                     f"signals={signal_text};scores={score_text};scalp_scores={scalp_score_text};short_scores={short_score_text};"
                     f"prices={price_text};balances={balances_text};wallet_values={wallet_value_text};wallets={wallet_breakdown_text};account_total={account_total};spot_total={spot_total};spot_available={available_balance};futures_total={futures_total};futures_available={futures_available};invested_value={invested_value};markets={','.join(pairs)};"
                     f"best={best_pair}:{strategies[best_pair]}:{analyses[best_pair].score}/{scalp_analyses[best_pair].score};"
@@ -544,21 +600,27 @@ def main() -> None:
                     order_max = max(Decimal("5"), Decimal(str(settings.get("order_size_usdc", "25"))))
                     size_multipliers[directive_symbol] = max(Decimal("0.25"), min(Decimal("1"), directive_notional / order_max))
 
+            short_state_before = load_derivatives_state(derivatives_path)
+            short_position = short_state_before.position
             result = run_portfolio_cycle(
                 client,
                 signals,
                 state_path,
                 PortfolioLimits.from_settings(runtime_settings) if settings else PortfolioLimits.from_env(),
                 reporter.record_trade if reporter else None,
-                allow_new_entries=allow_new_entries,
+                allow_new_entries=allow_new_entries and not short_state_before.pending_open
+                                  and not short_state_before.pending_close_id and not short_state_before.pending_reports,
                 quote_asset=quote_asset,
                 entry_strategies=strategies,
                 entry_stop_fractions=stop_overrides,
                 entry_target_fractions=activation_overrides,
                 entry_size_multipliers=size_multipliers,
                 entry_max_hold_seconds=max_hold_overrides,
+                other_realized_pnl=Decimal(short_state_before.realized_pnl),
+                other_open_notional=Decimal(short_position.notional) if short_position else Decimal("0"),
+                blocked_symbols=frozenset({short_position.symbol}) if short_position else frozenset(),
             )
-            if directive and directive_direction == "LONG" and result.startswith("bought:"):
+            if directive and directive_direction == "LONG" and result.startswith(f"bought:{directive_symbol}:"):
                 reporter.finish_directive(int(directive["id"]), "executed", result)
                 reporter.record_event("trade_directive_executed", result)
                 directive = None
@@ -569,6 +631,7 @@ def main() -> None:
             if reporter and result.startswith(("sold:", "bought:")):
                 reporter.record_event("spot_execution", result)
 
+            short_result = "short_disabled"
             if client.credentials is not None and settings is not None:
                 spot_state = load_state(state_path)
                 derivative_mode = "futures" if bool(settings.get("futures_enabled")) and risk_profile == "extreme" else "margin"
@@ -581,14 +644,16 @@ def main() -> None:
                     short_signals,
                     short_confidences,
                     runtime_settings,
-                    Path(os.getenv("DERIVATIVES_STATE_PATH", "/var/lib/ai-trading-app/derivatives-state.json")),
+                    derivatives_path,
                     reporter.record_trade if reporter else None,
                     spot_realized_pnl=Decimal(spot_state.realized_pnl),
-                    allow_new_entries=allow_new_entries,
+                    allow_new_entries=allow_new_entries and not spot_state.pending_reports and not spot_state.pending_action,
                     preferred_symbol=directive_symbol if directive and directive_direction == "SHORT" else None,
                     requested_notional=directive_notional if directive and directive_direction == "SHORT" else None,
+                    spot_open_notional=sum((Decimal(p.quote_spent) for p in spot_state.positions or []), Decimal("0")),
+                    spot_open_symbols=frozenset(p.symbol for p in spot_state.positions or []),
                 )
-                if directive and directive_direction == "SHORT" and (short_result.startswith("margin_short_opened:") or short_result.startswith("futures_short_opened:")):
+                if directive and directive_direction == "SHORT" and any(short_result.startswith(f"{mode}_short_opened:{directive_symbol}:") for mode in ("margin", "futures")):
                     reporter.finish_directive(int(directive["id"]), "executed", short_result)
                     reporter.record_event("trade_directive_executed", short_result)
                     directive = None
@@ -596,6 +661,10 @@ def main() -> None:
                     LOG.warning("derivatives cycle result=%s", short_result)
                 if reporter and ("_closed" in short_result or "_opened:" in short_result):
                     reporter.record_event("short_execution", short_result)
+            cycle_status = f"spot={result};short={short_result}"
+            if reporter and (cycle_status != last_cycle_status or time.time() - last_cycle_report >= 300):
+                reporter.record_event("cycle_status", cycle_status)
+                last_cycle_status, last_cycle_report = cycle_status, time.time()
         except Exception as exc:
             LOG.exception("trading cycle failed; no new order will be submitted")
             if reporter:

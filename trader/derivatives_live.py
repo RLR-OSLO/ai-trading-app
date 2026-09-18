@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from .binance import BinanceCredentials, BinanceError
 from .derivatives import BinanceFuturesClient, BinanceMarginClient
+from .journal import checkpoint_trade, flush_reports
 
 
 # Shorting is intentionally conservative: one live short position is tracked,
@@ -48,6 +50,9 @@ class DerivativesState:
     trades_today: int = 0
     position: ShortPosition | None = None
     cooldown_until: int = 0
+    pending_reports: list[dict[str, Any]] = field(default_factory=list)
+    pending_close_id: str | None = None
+    pending_open: dict[str, Any] | None = None
 
 
 def _today() -> str:
@@ -65,6 +70,9 @@ def load_state(path: Path) -> DerivativesState:
         trades_today=int(raw.get("trades_today", 0)),
         position=ShortPosition(**pos) if pos else None,
         cooldown_until=int(raw.get("cooldown_until", 0)),
+        pending_reports=raw.get("pending_reports", []),
+        pending_close_id=raw.get("pending_close_id"),
+        pending_open=raw.get("pending_open"),
     )
     if state.day != _today():
         state.day = _today()
@@ -101,12 +109,99 @@ def _tick(client: BinanceMarginClient, symbol: str, price: Decimal) -> Decimal:
     return (price / tick).to_integral_value(rounding=ROUND_DOWN) * tick
 
 
-def _record(report_trade: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]) -> None:
-    if report_trade:
-        report_trade(payload)
+def _finalize_short_close(state, path, order, reason, report_trade) -> str:
+    position = state.position
+    if position is None:
+        return "short_no_position"
+    status = str(order.get("status", ""))
+    if status not in {"FILLED", "EXPIRED", "CANCELED", "REJECTED"}:
+        return f"short_pending_exchange_order:{status or 'UNKNOWN'}"
+    executed = Decimal(str(order.get("executedQty", "0")))
+    tracked = Decimal(position.quantity)
+    if executed <= 0 or executed > tracked:
+        # Preserve evidence and the pending order. Never infer a fill from the
+        # requested quantity or a current ticker price.
+        return "short_reconciliation_required:invalid_fill_quantity"
+    spent = Decimal(str(order.get("cumQuote", order.get("cummulativeQuoteQty", "0"))))
+    if spent <= 0:
+        avg = Decimal(str(order.get("avgPrice") or "0"))
+        spent = avg * executed
+    if spent <= 0:
+        return "short_reconciliation_required:missing_fill_price"
+    pnl = Decimal(position.entry_price) * executed - spent
+    state.realized_pnl = str(Decimal(state.realized_pnl) + pnl)
+    state.trades_today += 1
+    state.pending_close_id = None
+    if executed == tracked:
+        state.position = None
+    else:
+        position.quantity = str(tracked - executed)
+        position.notional = str(Decimal(position.entry_price) * (tracked - executed))
+        position.protection_ids = ()
+    state.cooldown_until = int(time.time()) + 300
+    checkpoint_trade(state, path, save_state, report_trade, {
+        "mode": position.mode, "symbol": position.symbol, "side": "BUY",
+        "quantity": str(executed), "entry_price": position.entry_price,
+        "exit_price": str(spent / executed), "pnl": str(pnl), "leverage": position.leverage,
+    })
+    return f"{position.mode}_short_closed:{position.symbol}:pnl={pnl};reason={reason}"
 
 
-def _update_short_position(position: ShortPosition, current: Decimal, current_signal: bool) -> str | None:
+def _complete_short_open(client, state, path, order, report_trade) -> str:
+    pending = state.pending_open
+    if not pending:
+        return "short_reconciliation_required:missing_entry"
+    status = str(order.get("status", ""))
+    if status not in {"FILLED", "EXPIRED", "CANCELED", "REJECTED"}:
+        return f"short_pending_exchange_order:{status or 'UNKNOWN'}"
+    executed = Decimal(str(order.get("executedQty", "0")))
+    if executed <= 0:
+        if status == "FILLED":
+            return "short_reconciliation_required:invalid_entry_fill"
+        state.pending_open = None
+        state.cooldown_until = int(time.time()) + 300
+        save_state(path, state)
+        return f"short_open_rejected:{pending['symbol']}:{status}"
+    received = Decimal(str(order.get("cumQuote", order.get("cummulativeQuoteQty", "0"))))
+    if received <= 0:
+        received = Decimal(str(order.get("avgPrice") or "0")) * executed
+    if received <= 0:
+        return "short_reconciliation_required:missing_entry_price"
+    entry = received / executed
+    position = ShortPosition(pending["mode"], pending["symbol"], str(executed), str(entry),
+        str(received), int(pending["opened_at"]), pending["stop"], pending["target"],
+        int(pending["leverage"]), trough_price=str(entry))
+    state.position, state.pending_open = position, None
+    state.trades_today += 1
+    checkpoint_trade(state, path, save_state, report_trade, {
+        "mode": position.mode, "symbol": position.symbol, "side": "SELL",
+        "quantity": str(executed), "entry_price": str(entry), "exit_price": None,
+        "pnl": None, "leverage": position.leverage,
+    })
+    stop = entry * (Decimal("1") + Decimal(position.stop_fraction))
+    target = entry * (Decimal("1") - Decimal(position.target_fraction))
+    try:
+        if position.mode == "margin":
+            protection = client.protective_short_oco(symbol=position.symbol, quantity=executed,
+                take_profit_price=_tick(client, position.symbol, target), stop_price=_tick(client, position.symbol, stop),
+                live_trading_enabled=True, list_client_order_id=f"ait-mo-{uuid4().hex[:24]}")
+            position.protection_ids = (int(protection["orderListId"]),)
+        else:
+            for order_type, price, prefix in (("STOP_MARKET", stop, "fs"), ("TAKE_PROFIT_MARKET", target, "ft")):
+                protection = client.close_algo(symbol=position.symbol, side="BUY", order_type=order_type,
+                    trigger_price=price, live_trading_enabled=True, client_algo_id=f"ait-{prefix}-{uuid4().hex[:24]}")
+                position.protection_ids += (int(protection["algoId"]),)
+                save_state(path, state)
+        save_state(path, state)
+    except Exception:
+        save_state(path, state)
+        close = _close_futures if position.mode == "futures" else _close_margin
+        close(client, state, path, "protection_failed", report_trade)
+        raise
+    return f"{position.mode}_short_opened:{position.symbol}:notional={received}:leverage={position.leverage}:stop={stop}:target={target}"
+
+
+def _update_short_position(position: ShortPosition, current: Decimal, current_signal: bool | None) -> str | None:
     """Update a short's best price and return an exit reason when needed.
 
     The exchange-side stop/target remains the last-resort protection. This local
@@ -140,7 +235,7 @@ def _update_short_position(position: ShortPosition, current: Decimal, current_si
         if current >= trailing_stop:
             return "trailing_stop"
 
-    if not current_signal and current <= entry * (Decimal("1") - SHORT_SIGNAL_EXIT_MIN_PROFIT_FRACTION):
+    if current_signal is False and current <= entry * (Decimal("1") - SHORT_SIGNAL_EXIT_MIN_PROFIT_FRACTION):
         return "signal_reversal"
 
     hard_stop = entry * (Decimal("1") + stop_fraction)
@@ -165,27 +260,17 @@ def _close_margin(
         except BinanceError:
             pass
     qty = Decimal(position.quantity)
+    state.pending_close_id = f"ait-mc-{uuid4().hex[:24]}"
+    save_state(path, state)
     order = client.market_order(
         symbol=position.symbol,
         side="BUY",
         quantity=qty,
         live_trading_enabled=True,
         auto_borrow_repay=True,
-        client_order_id=f"ait-mc-{int(time.time())}"[:36],
+        client_order_id=state.pending_close_id,
     )
-    executed = Decimal(str(order.get("executedQty", qty)))
-    spent = Decimal(str(order.get("cummulativeQuoteQty", "0")))
-    if executed <= 0 or spent <= 0:
-        raise BinanceError("Margin short close returned invalid fill")
-    entry_value = Decimal(position.entry_price) * executed
-    pnl = entry_value - spent
-    state.realized_pnl = str(Decimal(state.realized_pnl) + pnl)
-    state.trades_today += 1
-    state.position = None
-    state.cooldown_until = int(time.time()) + 300
-    save_state(path, state)
-    _record(report_trade, {"mode": "margin", "symbol": position.symbol, "side": "BUY", "quantity": str(executed), "entry_price": position.entry_price, "exit_price": str(spent / executed), "pnl": str(pnl), "leverage": 1})
-    return f"margin_short_closed:{position.symbol}:pnl={pnl};reason={reason}"
+    return _finalize_short_close(state, path, order, reason, report_trade)
 
 
 def _open_margin(
@@ -204,43 +289,13 @@ def _open_margin(
     borrowable = client.max_borrowable(asset=base_asset)
     if borrowable < quantity:
         raise BinanceError(f"Insufficient margin borrowable inventory for {symbol}: {borrowable} < {quantity}")
-    order = client.market_order(
-        symbol=symbol,
-        side="SELL",
-        quantity=quantity,
-        live_trading_enabled=True,
-        auto_borrow_repay=True,
-        client_order_id=f"ait-ms-{int(time.time())}"[:36],
-    )
-    executed = Decimal(str(order.get("executedQty", "0")))
-    received = Decimal(str(order.get("cummulativeQuoteQty", "0")))
-    if executed <= 0 or received <= 0:
-        raise BinanceError("Margin short entry returned invalid fill")
-    entry = received / executed
-    take_profit = _tick(client, symbol, entry * (Decimal("1") - target_fraction))
-    stop = _tick(client, symbol, entry * (Decimal("1") + stop_fraction))
-    position = ShortPosition("margin", symbol, str(executed), str(entry), str(received), int(time.time()), str(stop_fraction), str(target_fraction), trough_price=str(entry))
-    state.position = position
+    state.pending_open = {"mode": "margin", "symbol": symbol, "client_id": f"ait-ms-{uuid4().hex[:24]}",
+                          "stop": str(stop_fraction), "target": str(target_fraction), "leverage": 1,
+                          "opened_at": int(time.time()), "notional": str(notional)}
     save_state(path, state)
-    try:
-        protection = client.protective_short_oco(
-            symbol=symbol,
-            quantity=executed,
-            take_profit_price=take_profit,
-            stop_price=stop,
-            live_trading_enabled=True,
-            list_client_order_id=f"ait-mo-{int(time.time())}"[:36],
-        )
-        order_list_id = int(protection["orderListId"])
-        position.protection_ids = (order_list_id,)
-        save_state(path, state)
-    except Exception:
-        _close_margin(client, state, path, "protection_failed", report_trade)
-        raise
-    state.trades_today += 1
-    save_state(path, state)
-    _record(report_trade, {"mode": "margin", "symbol": symbol, "side": "SELL", "quantity": str(executed), "entry_price": str(entry), "exit_price": None, "pnl": None, "leverage": 1})
-    return f"margin_short_opened:{symbol}:notional={received}:stop={stop}:target={take_profit}"
+    order = client.market_order(symbol=symbol, side="SELL", quantity=quantity,
+        live_trading_enabled=True, auto_borrow_repay=True, client_order_id=state.pending_open["client_id"])
+    return _complete_short_open(client, state, path, order, report_trade)
 
 
 def _close_futures(
@@ -259,16 +314,10 @@ def _close_futures(
         except BinanceError:
             pass
     qty = Decimal(position.quantity)
-    order = client.market_order(symbol=position.symbol, side="BUY", quantity=qty, live_trading_enabled=True, reduce_only=True, client_order_id=f"ait-fc-{int(time.time())}"[:36])
-    exit_price = Decimal(str(order.get("avgPrice") or client.ticker_price(position.symbol)))
-    pnl = (Decimal(position.entry_price) - exit_price) * qty
-    state.realized_pnl = str(Decimal(state.realized_pnl) + pnl)
-    state.trades_today += 1
-    state.position = None
-    state.cooldown_until = int(time.time()) + 300
+    state.pending_close_id = f"ait-fc-{uuid4().hex[:24]}"
     save_state(path, state)
-    _record(report_trade, {"mode": "futures", "symbol": position.symbol, "side": "BUY", "quantity": str(qty), "entry_price": position.entry_price, "exit_price": str(exit_price), "pnl": str(pnl), "leverage": position.leverage})
-    return f"futures_short_closed:{position.symbol}:pnl={pnl};reason={reason}"
+    order = client.market_order(symbol=position.symbol, side="BUY", quantity=qty, live_trading_enabled=True, reduce_only=True, client_order_id=state.pending_close_id)
+    return _finalize_short_close(state, path, order, reason, report_trade)
 
 
 def _open_futures(
@@ -286,32 +335,13 @@ def _open_futures(
     client.set_isolated_margin(symbol=symbol, live_trading_enabled=True)
     client.set_leverage(symbol=symbol, leverage=leverage, live_trading_enabled=True)
     quantity = client.quantity_for_notional(symbol=symbol, notional=notional)
-    order = client.market_order(symbol=symbol, side="SELL", quantity=quantity, live_trading_enabled=True, client_order_id=f"ait-fs-{int(time.time())}"[:36])
-    entry = Decimal(str(order.get("avgPrice") or client.ticker_price(symbol)))
-    if entry <= 0:
-        raise BinanceError("Futures short entry returned invalid price")
-    position = ShortPosition("futures", symbol, str(quantity), str(entry), str(entry * quantity), int(time.time()), str(stop_fraction), str(target_fraction), leverage, trough_price=str(entry))
-    state.position = position
+    state.pending_open = {"mode": "futures", "symbol": symbol, "client_id": f"ait-fs-{uuid4().hex[:24]}",
+                          "stop": str(stop_fraction), "target": str(target_fraction), "leverage": leverage,
+                          "opened_at": int(time.time()), "notional": str(notional)}
     save_state(path, state)
-    stop_price = entry * (Decimal("1") + stop_fraction)
-    target_price = entry * (Decimal("1") - target_fraction)
-    protection_ids: list[int] = []
-    try:
-        stop = client.close_algo(symbol=symbol, side="BUY", order_type="STOP_MARKET", trigger_price=stop_price, live_trading_enabled=True, client_algo_id=f"ait-fstop-{int(time.time())}"[:36])
-        protection_ids.append(int(stop["algoId"]))
-        target = client.close_algo(symbol=symbol, side="BUY", order_type="TAKE_PROFIT_MARKET", trigger_price=target_price, live_trading_enabled=True, client_algo_id=f"ait-ftp-{int(time.time())}"[:36])
-        protection_ids.append(int(target["algoId"]))
-        position.protection_ids = tuple(protection_ids)
-        save_state(path, state)
-    except Exception:
-        position.protection_ids = tuple(protection_ids)
-        save_state(path, state)
-        _close_futures(client, state, path, "protection_failed", report_trade)
-        raise
-    state.trades_today += 1
-    save_state(path, state)
-    _record(report_trade, {"mode": "futures", "symbol": symbol, "side": "SELL", "quantity": str(quantity), "entry_price": str(entry), "exit_price": None, "pnl": None, "leverage": leverage})
-    return f"futures_short_opened:{symbol}:notional={entry * quantity}:leverage={leverage}:stop={stop_price}:target={target_price}"
+    order = client.market_order(symbol=symbol, side="SELL", quantity=quantity, live_trading_enabled=True,
+                                client_order_id=state.pending_open["client_id"])
+    return _complete_short_open(client, state, path, order, report_trade)
 
 
 def run_short_cycle(
@@ -326,25 +356,47 @@ def run_short_cycle(
     allow_new_entries: bool = True,
     preferred_symbol: str | None = None,
     requested_notional: Decimal | None = None,
+    spot_open_notional: Decimal = Decimal("0"),
+    spot_open_symbols: frozenset[str] = frozenset(),
 ) -> str:
     state = load_state(state_path)
+    flush_reports(state, state_path, save_state, report_trade)
     max_daily_loss = Decimal(str(settings.get("max_daily_loss_usdc", "2")))
     combined_realized = spot_realized_pnl + Decimal(state.realized_pnl)
     if combined_realized <= -max_daily_loss:
         allow_new_entries = False
 
+    if state.pending_open:
+        pending = state.pending_open
+        pending_client = BinanceFuturesClient(credentials) if pending["mode"] == "futures" else BinanceMarginClient(credentials=credentials)
+        # Read the original order before doing anything else. Never blindly retry
+        # a borrow/SELL after a timeout; -2013 remains unresolved for an operator.
+        order = pending_client.query_order(symbol=pending["symbol"], orig_client_order_id=pending["client_id"])
+        return _complete_short_open(pending_client, state, state_path, order, report_trade)
+
     if state.position:
         position = state.position
-        current_signal = bool(short_signals.get(position.symbol, False))
+        if state.pending_close_id:
+            pending_client = BinanceFuturesClient(credentials) if position.mode == "futures" else BinanceMarginClient(credentials=credentials)
+            order = pending_client.query_order(symbol=position.symbol, orig_client_order_id=state.pending_close_id)
+            return _finalize_short_close(state, state_path, order, "reconciled_close", report_trade)
+        # Absence from the rotating top-five universe is not a reversal.
+        current_signal = short_signals.get(position.symbol)
         if position.mode == "futures":
             client = BinanceFuturesClient(credentials)
             exchange_positions = client.position_risk(symbol=position.symbol)
             amount = sum((abs(Decimal(str(x.get("positionAmt", "0")))) for x in exchange_positions), Decimal("0"))
             if amount == 0:
-                state.position = None
-                state.cooldown_until = int(time.time()) + 300
-                save_state(state_path, state)
-                return f"futures_short_closed_exchange:{position.symbol}"
+                for algo_id in position.protection_ids:
+                    try:
+                        algo = client.query_algo(algo_id=algo_id)
+                        if algo.get("actualOrderId"):
+                            order = client.query_order_by_id(symbol=position.symbol, order_id=int(algo["actualOrderId"]))
+                            if Decimal(str(order.get("executedQty", "0"))) > 0:
+                                return _finalize_short_close(state, state_path, order, "exchange_protection", report_trade)
+                    except BinanceError:
+                        continue
+                return f"futures_reconciliation_required:{position.symbol}"
             current = client.ticker_price(position.symbol)
             reason = _update_short_position(position, current, current_signal)
             save_state(state_path, state)
@@ -356,10 +408,13 @@ def run_short_cycle(
             try:
                 order_list = client.query_order_list(order_list_id=position.protection_ids[0])
                 if str(order_list.get("listOrderStatus", "")) != "EXECUTING":
-                    state.position = None
-                    state.cooldown_until = int(time.time()) + 300
-                    save_state(state_path, state)
-                    return f"margin_short_closed_exchange:{position.symbol}"
+                    for leg in order_list.get("orders", []):
+                        order = client.query_order_by_id(symbol=position.symbol, order_id=int(leg["orderId"]))
+                        if Decimal(str(order.get("executedQty", "0"))) > 0:
+                            return _finalize_short_close(state, state_path, order, "exchange_protection", report_trade)
+                    # An expired/cancelled OCO does not prove the borrowed asset
+                    # was repaid. Retain the position for reconciliation.
+                    return f"margin_reconciliation_required:{position.symbol}"
             except BinanceError:
                 pass
         current = client.ticker_price(position.symbol)
@@ -371,12 +426,14 @@ def run_short_cycle(
 
     if not allow_new_entries:
         return "short_new_entries_paused"
+    if state.pending_reports:
+        return "short_reporting_backlog"
     if not bool(settings.get("short_enabled")):
         return "short_disabled"
     if int(time.time()) < state.cooldown_until:
         return "short_cooldown"
 
-    candidates = [symbol for symbol, active in short_signals.items() if active]
+    candidates = [symbol for symbol, active in short_signals.items() if active and symbol not in spot_open_symbols]
     if not candidates:
         return "no_short_signal"
     if preferred_symbol and preferred_symbol in candidates:
@@ -387,8 +444,9 @@ def run_short_cycle(
     multiplier = max(Decimal("0.30"), Decimal("0.20") + confidence * Decimal("0.80"))
     max_position = Decimal(str(settings.get("order_size_usdc", "25")))
     capital_cap = Decimal(str(settings.get("trade_cap_usdc", max_position)))
-    automatic_notional = min(max_position * multiplier, capital_cap)
-    notional = min(max_position, capital_cap, requested_notional) if requested_notional is not None else automatic_notional
+    remaining_cap = max(Decimal("0"), capital_cap - max(Decimal("0"), spot_open_notional))
+    automatic_notional = min(max_position * multiplier, remaining_cap)
+    notional = min(max_position, remaining_cap, requested_notional) if requested_notional is not None else automatic_notional
     if notional < Decimal("5"):
         return "short_notional_below_minimum"
 

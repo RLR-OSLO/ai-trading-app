@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isCompassInternalAuth, supabase } from "../lib/supabase";
 import HowItWorks from "./how-it-works";
 import LogoutButton from "./logout-button";
@@ -9,6 +9,7 @@ import CommunityPanel from "./community-panel";
 import CommunityNotifications from "./community-notifications";
 import BullrunAlerts from "./bullrun-alerts";
 import VetoControls, { VetoIndicators } from "./veto-controls";
+import TradingActivity from "./trading-activity";
 
 type Settings = {
   bot_enabled: boolean;
@@ -143,12 +144,18 @@ function Sparkline({ points, hours }: { points: HistoryPoint[]; hours: 3 | 6 | 1
 
 export default function TradingDashboard() {
   const [settings, setSettings] = useState<Settings>(defaults);
+  const settingsDirty = useRef(false);
+  const settingsRevision = useRef(0);
+  const loading = useRef(false);
   const [openingPositions, setOpeningPositions] = useState<{ symbol: string; quantity: number; quote_spent: number }[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [lastEvent, setLastEvent] = useState<BotEvent | null>(null);
+  const [activityEvents, setActivityEvents] = useState<BotEvent[]>([]);
+  const [refreshError, setRefreshError] = useState("");
+  const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
   const [chatInput, setChatInput] = useState("");
   const [serverSignalExpanded, setServerSignalExpanded] = useState(false);
   const [priorityDirectives, setPriorityDirectives] = useState<TradeDirective[]>([]);
@@ -163,26 +170,42 @@ export default function TradingDashboard() {
   ]);
 
   const load = useCallback(async () => {
+    if (loading.current) return;
+    loading.current = true;
+    const revisionAtStart = settingsRevision.current;
+    try {
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) return;
-    const [{ data: row, error }, { data: recent }, { data: events }] = await Promise.all([
+    const [{ data: row, error }, { data: recent, error: tradesError }, { data: events, error: heartbeatError }, { data: activity, error: activityError }] = await Promise.all([
       supabase.from("bot_settings").select("bot_enabled,live_trading_enabled,risk_profile,quote_asset,trade_cap_usdc,order_size_usdc,stop_loss_percent,take_profit_percent,max_daily_loss_usdc,short_enabled,futures_enabled,leverage,daily_loss_reset_at").eq("user_id", userData.user.id).maybeSingle(),
-      supabase.from("trades").select("id,symbol,mode,side,quantity,entry_price,exit_price,pnl,leverage,created_at").order("created_at", { ascending: false }).limit(500),
-      supabase.from("bot_events").select("id,level,event_type,message,created_at").eq("event_type", "heartbeat").order("created_at", { ascending: false }).limit(1),
+      supabase.from("trades").select("id,symbol,mode,side,quantity,entry_price,exit_price,pnl,leverage,created_at").eq("user_id", userData.user.id).order("created_at", { ascending: false }).order("id", { ascending: false }).limit(500),
+      supabase.from("bot_events").select("id,level,event_type,message,created_at").eq("user_id", userData.user.id).eq("event_type", "heartbeat").order("created_at", { ascending: false }).limit(1),
+      supabase.from("bot_events").select("id,level,event_type,message,created_at").eq("user_id", userData.user.id).in("event_type", ["cycle_status", "spot_execution", "short_execution", "trading_cycle_error", "trade_directive_executed", "trade_directive_rejected", "state_recovered", "daily_loss_reset"]).order("created_at", { ascending: false }).limit(10),
     ]);
     if (error) setMessage(error.message);
-    if (row) setSettings(row as Settings);
+    const fetchErrors = [error, tradesError, heartbeatError, activityError].filter(Boolean);
+    setRefreshError(fetchErrors.map((item) => item!.message).join(" · "));
+    if (fetchErrors.length === 0) setRefreshedAt(new Date().toISOString());
+    if (row && !settingsDirty.current && settingsRevision.current === revisionAtStart) setSettings(row as Settings);
     if (recent) setTrades(recent as Trade[]);
-    if (events?.[0]) setLastEvent(events[0] as BotEvent);
+    if (!heartbeatError) setLastEvent((events?.[0] as BotEvent) ?? null);
+    if (!activityError) setActivityEvents((activity ?? []) as BotEvent[]);
     if (isCompassInternalAuth) {
-      const { data: positions, error: positionsError } = await supabase.from("trading_opening_positions").select("symbol,quantity,quote_spent");
+      const { data: positions, error: positionsError } = await supabase.from("trading_opening_positions").select("symbol,quantity,quote_spent").eq("user_id", userData.user.id);
       if (positionsError) setMessage(positionsError.message);
       else setOpeningPositions(positions ?? []);
     }
     setLoaded(true);
+    } finally { loading.current = false; }
   }, []);
 
-  useEffect(() => { void load(); const timer = window.setInterval(() => void load(), 30_000); return () => window.clearInterval(timer); }, [load]);
+  useEffect(() => {
+    const refresh = () => { void load().catch(() => setRefreshError("Forbindelsen ble avbrutt")); };
+    refresh();
+    const timer = window.setInterval(refresh, 15_000);
+    window.addEventListener("focus", refresh);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, [load]);
 
   async function loadPriorityDirectives() {
     const { data: userData } = await supabase.auth.getUser();
@@ -207,7 +230,7 @@ export default function TradingDashboard() {
     const pnl = (since: number) => trades.filter((trade) => new Date(trade.created_at).getTime() >= since).reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
     const won = trades.reduce((sum, trade) => sum + Math.max(0, Number(trade.pnl ?? 0)), 0);
     const lost = trades.reduce((sum, trade) => sum + Math.min(0, Number(trade.pnl ?? 0)), 0);
-    const feesEstimate = trades.reduce((sum, trade) => sum + Number(trade.quantity) * Number(trade.entry_price ?? trade.exit_price ?? 0) * 0.001, 0);
+    const feesEstimate = trades.reduce((sum, trade) => sum + Number(trade.quantity) * Number(trade.exit_price ?? trade.entry_price ?? 0) * 0.001, 0);
     return { total: pnl(0), day: pnl(now - 86_400_000), hour: pnl(now - 3_600_000), won, lost, feesEstimate };
   }, [trades]);
 
@@ -515,9 +538,11 @@ export default function TradingDashboard() {
     return () => { cancelled = true; window.clearInterval(timer); };
   }, []);
 
-  function update<K extends keyof Settings>(key: K, value: Settings[K]) { setSettings((current) => ({ ...current, [key]: value })); }
+  function update<K extends keyof Settings>(key: K, value: Settings[K]) { settingsDirty.current = true; settingsRevision.current++; setSettings((current) => ({ ...current, [key]: value })); }
 
   function applyRiskProfile(profile: Settings["risk_profile"]) {
+    settingsDirty.current = true;
+    settingsRevision.current++;
     const capital = Math.max(5, availableCapital);
     const presets = {
       low: { orderShare: 0.15, stop_loss_percent: 0.75, take_profit_percent: 1.5, dailyLossShare: 0.01 },
@@ -561,7 +586,7 @@ export default function TradingDashboard() {
       user_id: userData.user.id
     };
     const { error } = await supabase.from("bot_settings").upsert(safe, { onConflict: "user_id" });
-    setSaving(false); setMessage(error ? error.message : "Innstillingene er lagret."); if (!error) setSettings(safe);
+    setSaving(false); setMessage(error ? error.message : "Innstillingene er lagret."); if (!error) { settingsDirty.current = false; settingsRevision.current++; setSettings(safe); }
   }
 
   async function setLive(enabled: boolean) {
@@ -570,7 +595,7 @@ export default function TradingDashboard() {
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) { setSaving(false); return; }
     const { error } = await supabase.from("bot_settings").upsert({ ...next, user_id: userData.user.id, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
-    if (!error) setSettings(next);
+    if (!error) { settingsDirty.current = false; settingsRevision.current++; setSettings(next); }
     setMessage(error ? error.message : enabled ? "Live trading er aktivert." : "Trading er pauset.");
     setSaving(false);
   }
@@ -597,7 +622,7 @@ export default function TradingDashboard() {
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) { setSaving(false); return; }
     const { error } = await supabase.from("bot_settings").upsert({ ...next, user_id: userData.user.id, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
-    if (!error) setSettings(next);
+    if (!error) { settingsDirty.current = false; settingsRevision.current++; setSettings(next); }
     setMessage(error ? error.message : "NØDSTOPP AKTIV: Nye kjøp er blokkert. Eksisterende posisjoner overvåkes fortsatt av stop-loss/trailing og kan selges automatisk.");
     setSaving(false);
   }
@@ -794,6 +819,7 @@ export default function TradingDashboard() {
   return <main className="shell">
     <header className="topbar"><div><span className="eyebrow">AI TRADING APP</span><h1>Kontrollpanel</h1></div><div style={{ display: "flex", gap: 10, alignItems: "center" }}><span className="pill"><i /> {serverOnline ? "Server online" : "Ingen fersk serverstatus"}</span><LogoutButton /></div></header>
     {isCompassInternalAuth && <CommunityNotifications />}
+    <TradingActivity heartbeat={lastEvent} events={activityEvents} trade={trades[0]} error={refreshError} refreshedAt={refreshedAt} enabled={settings.bot_enabled} live={settings.live_trading_enabled} onRefresh={() => { void load().catch(() => setRefreshError("Forbindelsen ble avbrutt")); }} />
     <section className="hero"><div><p className="eyebrow">AI TRADING</p><h2>Spot, short-analyse og utvidet risikokontroll.</h2><p className="muted">Binance-uttak er deaktivert. Margin/Futures krever egne Binance-rettigheter.</p></div><div className="emergency-stop-box"><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button><small>Nødstopp blokkerer nye kjøp. Åpne posisjoner blir ikke dumpet umiddelbart; boten fortsetter å overvåke dem og kan selge ved stop-loss, trailing-stop eller annen aktiv exitregel. Start live igjen for å tillate nye kjøp.</small></div></section>
     <section className="panel" style={{ marginBottom: 18 }}>
       <div className="wallet-overview">
@@ -806,11 +832,11 @@ export default function TradingDashboard() {
     {isCompassInternalAuth && <section className="panel"><p><b>Gjenopprettet innlogging og Binance-tilkobling.</b> Tidligere botresultater er ikke fullt gjenopprettet. Bevarte posisjoner tas med med registrert kostpris; eldre Binance-handler vises separat nedenfor.</p><p className="muted">Kontroller handelsinnstillingene før du velger Start live. Før første aktivering sender serveren bare status og legger ikke inn eller endrer ordre.</p></section>}
     <section className="grid metrics">
       <article><span className="label">Tilgjengelig kapital</span><strong>{money(availableCapital)} {settings.quote_asset}</strong><small>Fri saldo tilgjengelig for boten</small></article>
-      <article><span className="label">{isCompassInternalAuth ? "Resultat etter gjenoppretting" : "Totalt resultat"}</span><strong className={stats.total < 0 ? "loss" : "gain"}>{money(stats.total)} USDC</strong><small>Realisert gevinst/tap</small></article>
+      <article><span className="label">{isCompassInternalAuth ? "Resultat etter gjenoppretting" : "Totalt resultat"}</span><strong className={stats.total < 0 ? "loss" : "gain"}>{money(stats.total)} USDC</strong><small>Registrert resultat. Alle gebyrer, funding og lånerenter er ikke avstemt.</small></article>
       <article><span className="label">Vunnet</span><strong className="gain">{money(stats.won)} USDC</strong><small>Sum lønnsomme handler</small></article>
       <article><span className="label">Tapt</span><strong className="loss">{money(Math.abs(stats.lost))} USDC</strong><small>Sum tapte handler</small></article>
       <article><span className="label">Siste døgn</span><strong className={stats.day < 0 ? "loss" : "gain"}>{money(stats.day)} USDC</strong><small>Siste time: {money(stats.hour)} USDC</small></article>
-      <article><span className="label">Estimerte gebyrer</span><strong>{money(stats.feesEstimate)} USDC</strong><small>{trades.length} registrerte ordre</small></article>
+      <article><span className="label">Estimerte gebyrer</span><strong>{money(stats.feesEstimate)} USDC</strong><small>Regneeksempel: 0,10 % per ordre. Ikke faktiske avstemte kostnader.</small></article>
     </section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">RISIKOKONTROLL</p><h3>Handelsinnstillinger</h3></div><span className={settings.live_trading_enabled ? "status-live" : "status-paused"}>{settings.live_trading_enabled ? "LIVE" : "PAUSET"}</span></div>
       <div className="form-grid">
@@ -911,7 +937,7 @@ export default function TradingDashboard() {
         })}</tbody></table></div>}
       <p className="muted portfolio-help">Klikk på en kolonneoverskrift for å sortere. Klikk én gang til for motsatt rekkefølge. Grønn = positivt resultat. Rød = negativt resultat. Lilla = Margin-short. Oransje = Futures-short.</p>
     </section>
-    <section className="panel trade-history-panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><div className="trade-head-actions"><span className="muted">Oppdateres hvert 30. sekund</span><button type="button" className="secondary compact" onClick={() => void downloadTradesCsv()}>Last ned CSV</button></div></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list"><div className="trade-row trade-header"><span>Handel</span><span>Antall</span><span>Inngang</span><span>Utgang</span><span>Resultat</span><span>Tid</span></div>{trades.slice(0, 20).map((trade) => { const derivative = trade.mode === "margin" || trade.mode === "futures"; const modeClass = trade.mode === "futures" ? "trade-futures" : trade.mode === "margin" ? "trade-margin" : "trade-spot"; const label = trade.mode === "futures" ? `SHORT · FUTURES · ${Number(trade.leverage ?? 1)}x` : trade.mode === "margin" ? "SHORT · MARGIN" : "SPOT"; return <div className={`trade-row ${modeClass}`} key={trade.id}><div><span className={`trade-mode-badge ${modeClass}`}>{label}</span><b>{trade.side} <CoinLink asset={trade.symbol} label={trade.symbol} /></b><small>{derivative ? (trade.side === "SELL" ? "Åpnet short-posisjon" : "Lukket short-posisjon") : (trade.side === "BUY" ? "Kjøpt spot" : "Solgt spot")}</small></div><span>{Number(trade.quantity).toPrecision(6)}</span><span>{trade.entry_price == null ? "–" : money(Number(trade.entry_price))}</span><span>{trade.exit_price == null ? "ÅPEN" : money(Number(trade.exit_price))}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{trade.pnl == null ? "–" : `${Number(trade.pnl) >= 0 ? "+" : ""}${money(Number(trade.pnl))} ${settings.quote_asset}`}</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>; })}</div>}</section>
+    <section id="trade-history" className="panel trade-history-panel"><div className="panel-head"><div><p className="eyebrow">AKTIVITET</p><h3>Siste handler</h3></div><div className="trade-head-actions"><span className="muted">Oppdateres hvert 15. sekund</span><button type="button" className="secondary compact" onClick={() => void downloadTradesCsv()}>Last ned CSV</button></div></div>{trades.length === 0 ? <p className="empty">Ingen live-handler registrert ennå.</p> : <div className="trade-list"><div className="trade-row trade-header"><span>Handel</span><span>Antall</span><span>Inngang</span><span>Utgang</span><span>Resultat</span><span>Tid</span></div>{trades.slice(0, 20).map((trade) => { const derivative = trade.mode === "margin" || trade.mode === "futures"; const modeClass = trade.mode === "futures" ? "trade-futures" : trade.mode === "margin" ? "trade-margin" : "trade-spot"; const label = trade.mode === "futures" ? `SHORT · FUTURES · ${Number(trade.leverage ?? 1)}x` : trade.mode === "margin" ? "SHORT · MARGIN" : "SPOT"; return <div className={`trade-row ${modeClass}`} key={trade.id}><div><span className={`trade-mode-badge ${modeClass}`}>{label}</span><b>{trade.side} <CoinLink asset={trade.symbol} label={trade.symbol} /></b><small>{derivative ? (trade.side === "SELL" ? "Åpnet short-posisjon" : "Lukket short-posisjon") : (trade.side === "BUY" ? "Kjøpt spot" : "Solgt spot")}</small></div><span>{Number(trade.quantity).toPrecision(6)}</span><span>{trade.entry_price == null ? "–" : money(Number(trade.entry_price))}</span><span>{trade.exit_price == null ? "ÅPEN" : money(Number(trade.exit_price))}</span><span className={Number(trade.pnl ?? 0) < 0 ? "loss" : "gain"}>{trade.pnl == null ? "–" : `${Number(trade.pnl) >= 0 ? "+" : ""}${money(Number(trade.pnl))} ${settings.quote_asset}`}</span><time>{new Date(trade.created_at).toLocaleString("nb-NO")}</time></div>; })}</div>}</section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">SERVERSTATUS</p><h3>Siste kontrollsignal</h3></div><div className="server-signal-actions">{lastEvent && <time className="muted">{new Date(lastEvent.created_at).toLocaleString("nb-NO")}</time>}<button type="button" className="secondary compact" onClick={() => setServerSignalExpanded((value) => !value)}>{serverSignalExpanded ? "Skjul" : "Utvid"}</button></div></div><p className={`server-signal ${serverSignalExpanded ? "expanded" : "collapsed"} ${lastEvent?.level === "error" ? "loss" : "muted"}`}>{lastEvent?.message ?? "Serverrapportering er ikke koblet til ennå."}</p></section>
     <section className="panel chat-panel"><div className="panel-head"><div><p className="eyebrow">TRADINGASSISTENT</p><h3>Spør om det boten faktisk gjør</h3></div><span className="muted">Basert på ferske Binance- og botdata</span></div>
       <div className="chat-log" aria-live="polite">{chatMessages.map((item) => <div className={`chat-bubble ${item.role}`} key={item.id}><small>{item.role === "boss" ? "SJEFEN" : "BOTTEN"}</small><p>{item.text}</p></div>)}</div>

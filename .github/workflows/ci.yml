@@ -28,4 +28,5 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      - run: node --experimental-strip-types --test tests-js/trading-activity.test.mjs
       - run: npm run build

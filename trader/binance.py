@@ -8,7 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, localcontext
 from typing import Any
 
 
@@ -175,9 +175,28 @@ class BinanceSpotClient:
         return self._request(
             "POST",
             "/api/v3/order/test",
-            {"symbol": symbol, "side": "BUY", "type": "MARKET", "quoteOrderQty": format(quote_quantity, "f")},
+            {"symbol": symbol, "side": "BUY", "type": "MARKET", "quoteOrderQty": self.quote_order_amount(symbol, quote_quantity)},
             signed=True,
         )
+
+    def quote_order_amount(self, symbol: str, amount: Decimal) -> str:
+        """Respect the exchange precision without rounding above the budget.
+
+        Confidence/learning multipliers can produce 28 fractional digits. Binance
+        rejects that representation before evaluating an otherwise valid order.
+        Both the test and real request must use exactly the same normalization.
+        """
+        if not amount.is_finite() or amount <= 0:
+            raise ValueError("Quote amount must be finite and positive")
+        precision = int(self.symbol_info(symbol).get("quoteAssetPrecision", 8))
+        if not 0 <= precision <= 20:
+            raise BinanceError("Unsupported quote asset precision")
+        with localcontext() as context:
+            context.prec = max(40, len(amount.as_tuple().digits) + precision)
+            rounded = amount.quantize(Decimal(1).scaleb(-precision), rounding=ROUND_DOWN)
+        if rounded <= 0 or rounded >= Decimal("1e20"):
+            raise ValueError("Quote amount is outside the exchange range")
+        return format(rounded, "f")
 
     def market_buy_by_quote(
         self,
@@ -193,7 +212,7 @@ class BinanceSpotClient:
             "symbol": symbol,
             "side": "BUY",
             "type": "MARKET",
-            "quoteOrderQty": format(quote_quantity, "f"),
+            "quoteOrderQty": self.quote_order_amount(symbol, quote_quantity),
             "newOrderRespType": "FULL",
         }
         if client_order_id:

@@ -91,6 +91,18 @@ class SupabaseReporter:
         mode = str(clean.pop("mode", "live"))
         if mode not in {"paper", "live", "margin", "futures"}:
             raise ValueError(f"Unsupported trade mode: {mode}")
+        execution_key = clean.pop("execution_key", None)
+        if execution_key and self.is_compass:
+            body = json.dumps({**clean, "mode": mode, "execution_key": execution_key,
+                               "user_id": self.user_id}).encode("utf-8")
+            query = urllib.parse.urlencode({"on_conflict": "user_id,execution_key"})
+            request = urllib.request.Request(
+                f"{self.url}/rest/v1/trades?{query}", data=body, method="POST",
+                headers={**supabase_headers(self.service_role_key),
+                         "Prefer": "resolution=ignore-duplicates,return=minimal"},
+            )
+            with urllib.request.urlopen(request, timeout=10):
+                return
         self._insert("trades", {**clean, "mode": mode})
 
     def expire_stale_directives(self) -> None:

@@ -109,6 +109,12 @@ class BinanceMarginClient(BinanceSpotClient):
     def cancel_order_list(self, *, symbol: str, order_list_id: int) -> dict[str, Any]:
         return self._request("DELETE", "/sapi/v1/margin/orderList", {"symbol": symbol, "orderListId": order_list_id}, signed=True)
 
+    def query_order_by_id(self, *, symbol: str, order_id: int) -> dict[str, Any]:
+        return self._request("GET", "/sapi/v1/margin/order", {"symbol": symbol, "orderId": order_id}, signed=True)
+
+    def query_order(self, *, symbol: str, orig_client_order_id: str) -> dict[str, Any]:
+        return self._request("GET", "/sapi/v1/margin/order", {"symbol": symbol, "origClientOrderId": orig_client_order_id}, signed=True)
+
 
 class BinanceFuturesClient(BinanceSpotClient):
     """USD-M futures client with explicit live lock and no transfer/withdrawal methods."""
@@ -234,6 +240,15 @@ class BinanceFuturesClient(BinanceSpotClient):
         if not live_trading_enabled:
             raise BinanceError("Futures live-trading safety lock is disabled")
         return self._request("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id}, signed=True)
+
+    def query_algo(self, *, algo_id: int) -> dict[str, Any]:
+        return self._request("GET", "/fapi/v1/algoOrder", {"algoId": algo_id}, signed=True)
+
+    def query_order_by_id(self, *, symbol: str, order_id: int) -> dict[str, Any]:
+        return self._request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id}, signed=True)
+
+    def query_order(self, *, symbol: str, orig_client_order_id: str) -> dict[str, Any]:
+        return self._request("GET", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": orig_client_order_id}, signed=True)
 
 
 def capability_snapshot(credentials: BinanceCredentials) -> DerivativesCapability:
