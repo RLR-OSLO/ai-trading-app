@@ -31,6 +31,16 @@ For a server rollout, first inspect the active unit/override and process command
 
 Rollback must retain the current state and resolve any pending orders/reports. The old engine does not understand the new derivatives pending-order fields; a blind rollback while those fields are populated can lose reconciliation evidence. Do not restore an old position snapshot after trades have occurred.
 
+### Update an already active installation
+
+`deploy/update_active_worker.py` is a separate rollout path for an existing active Compass service. The older recovery updater retains its requirement that all accounts be unactivated.
+
+Run the new updater as root with a full, reviewed engine commit in `--revision` and the observed active directory in `--expected-working-directory`. Without `--apply` it only checks the existing setup. With `--apply` it stages the pinned code, verifies the reporting column, checks every state file for pending orders/reports, backs up environment/configuration/state in a private root directory, stops the one existing service and replaces only its WorkingDirectory. Account settings and credentials are never written. Any pending operation discovered after stopping aborts the switch and restarts the previous code with the current state intact.
+
+After attempting to start the new code, the updater never blindly rolls back or restores old state. It waits up to 180 seconds for the new engine version from all previously reporting accounts and a completed cycle from each execution-authorized account. A timeout means verification is incomplete, not that the service should be reinstalled. Preserve its output and backup location for diagnosis.
+
+The updater is covered by 15 tests for state preservation, separate accounts, pending-operation guards, config preservation, rollback boundaries, read-only database access and multi-account health verification. Its publication alone does not mean a server rollout has occurred.
+
 ## Remaining strategy work
 
 Profitability still needs actual commission, funding and borrow-interest reconciliation, representative historical validation with spread/slippage, walk-forward evaluation and an observed forward-testing period. A small positive gross sample is insufficient. Capital concentration and leverage remain bounded by each account's existing settings. No broader leverage or entry-threshold expansion is included in this repair.
