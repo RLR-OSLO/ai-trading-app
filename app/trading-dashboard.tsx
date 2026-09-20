@@ -8,6 +8,8 @@ import RecoveredHistory from "./recovered-history";
 import CommunityPanel from "./community-panel";
 import CommunityNotifications from "./community-notifications";
 import BullrunAlerts from "./bullrun-alerts";
+import FuturesBalance from "./futures-balance";
+import { futuresWallet, walletNumber } from "../lib/trading-wallet";
 import VetoControls, { VetoIndicators } from "./veto-controls";
 import TradingActivity from "./trading-activity";
 import { TradingCommandsProvider, PositionActions, TradingCommandStatus, useTradingCommands } from "./trading-commands";
@@ -400,13 +402,14 @@ function DashboardContent() {
   };
   const spotAvailable = heartbeatNumber("spot_available", availableCapital);
   const spotTotal = heartbeatNumber("spot_total", availableCapital + portfolioValue);
-  const futuresAvailable = heartbeatNumber("futures_available", 0);
-  const futuresTotal = heartbeatNumber("futures_total", 0);
+  const futures = futuresWallet(lastEvent?.message ?? "", !!lastEvent && Date.now() - Date.parse(lastEvent.created_at) < 180_000);
+  const futuresAvailable = futures.tradable;
+  const futuresTotal = futures.value;
 
   const totalAssets = useMemo(() => {
-    const match = lastEvent?.message.match(/(?:^|;)account_total=([0-9.]+)/);
-    const value = match ? Number(match[1]) : Number.NaN;
-    return Number.isFinite(value) ? value : spotTotal + futuresTotal;
+    const match = lastEvent?.message.match(/(?:^|;)account_total=([^;]+)/);
+    const value = walletNumber(match?.[1]);
+    return value ?? (futuresTotal === null ? null : spotTotal + futuresTotal);
   }, [lastEvent, spotTotal, futuresTotal]);
 
   const serverOnline = lastEvent ? Date.now() - new Date(lastEvent.created_at).getTime() < 900_000 : false;
@@ -459,7 +462,8 @@ function DashboardContent() {
     const addCandidate = (symbol: string, direction: SetupDirection, rawScore: number, longScore: number, shortScore: number) => {
       const signalBonus = direction === "VENT" ? 0 : 3;
       const rank = rawScore + signalBonus + (direction === "LONG" && (longRaw.includes(`${symbol}:bullrun`) || longRaw.includes(`${symbol}:scalp`)) ? 1 : 0);
-      const ratio = rawScore / threshold;
+      const applicableThreshold = direction === "SHORT" ? Number(field("short_threshold") ?? 7) : threshold;
+      const ratio = rawScore / applicableThreshold;
       const grade = direction === "VENT" ? "C" : ratio >= 1.45 ? "A" : ratio >= 1.05 ? "B" : "C";
       const sizeFactor = grade === "A" ? 1 : grade === "B" ? 0.7 : 0.4;
       const mode = direction === "LONG"
@@ -467,7 +471,7 @@ function DashboardContent() {
         : direction === "SHORT"
           ? settings.futures_enabled && settings.risk_profile === "extreme" ? "FUTURES" : settings.short_enabled ? "MARGIN" : "SHORT AV"
           : "INGEN HANDEL";
-      const walletAvailable = mode === "FUTURES" ? futuresAvailable : spotAvailable;
+      const walletAvailable = mode === "FUTURES" ? futuresAvailable * Number(settings.leverage) * 0.98 : spotAvailable;
       const suggested = Math.min(Number(settings.order_size_usdc), Number(settings.trade_cap_usdc), walletAvailable) * sizeFactor;
       const recommendedLeverage = direction === "SHORT" && mode === "FUTURES"
         ? Math.min(riskLeverageCeiling, rawScore >= threshold * 1.7 ? 3 : rawScore >= threshold * 1.35 ? 2 : 1)
@@ -785,9 +789,9 @@ function DashboardContent() {
     <section className="hero"><div><p className="eyebrow">AI TRADING</p><h2>Spot, short-analyse og utvidet risikokontroll.</h2><p className="muted">Binance-uttak er deaktivert. Margin/Futures krever egne Binance-rettigheter.</p></div><div className="emergency-stop-box"><button className="danger" onClick={() => void emergencyStop()} disabled={saving}>Nødstopp</button><small>Nødstopp blokkerer nye kjøp. Åpne posisjoner blir ikke dumpet umiddelbart; boten fortsetter å overvåke dem og kan selge ved stop-loss, trailing-stop eller annen aktiv exitregel. Start automatisk handel igjen for å tillate nye automatiske kjøp.</small></div></section>
     <section className="panel" style={{ marginBottom: 18 }}>
       <div className="wallet-overview">
-        <div className="wallet-total"><span className="label">TOTAL BINANCE-VERDI</span><strong>{money(totalAssets)} {settings.quote_asset}</strong><small>Spot + Futures</small></div>
+        <div className="wallet-total"><span className="label">TOTAL BINANCE-VERDI</span><strong>{totalAssets === null ? "Ukjent" : money(totalAssets)} {settings.quote_asset}</strong><small>Spot + Futures</small></div>
         <div><span className="label">SPOT TOTALT</span><strong>{money(spotTotal)} {settings.quote_asset}</strong><small>Ledig Spot: {money(spotAvailable)} · Investert Spot: {money(portfolioValue)}</small></div>
-        <div><span className="label">FUTURES TOTALT</span><strong>{money(futuresTotal)} {settings.quote_asset}</strong><small>Disponibelt: {money(futuresAvailable)} · Investert: {money(Math.max(0, futuresTotal - futuresAvailable))} {settings.quote_asset}</small></div>
+        <FuturesBalance wallet={futures} quote={settings.quote_asset} />
         <div className="wallet-other"><span className="label">ANDRE BINANCE-LOMMEBØKER</span><strong>{binanceWalletBreakdown.size === 0 ? "–" : money(Array.from(binanceWalletBreakdown.values()).reduce((sum, value) => sum + value, 0))} {settings.quote_asset}</strong><small>{binanceWalletBreakdown.size === 0 ? "Ingen ekstra wallet-saldo registrert" : Array.from(binanceWalletBreakdown.entries()).map(([name, value]) => `${name}: ${money(value)}`).join(" · ")}</small><small>Vises separat og regnes ikke som ledig tradingkapital før overført til Spot/Futures.</small></div>
       </div>
     </section>

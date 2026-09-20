@@ -174,7 +174,8 @@ def health_ready(rows: list[dict], expected: dict[str, bool]) -> bool:
         if not heartbeat:
             return False
         fields = dict(part.split("=", 1) for part in heartbeat["message"].split(";") if "=" in part)
-        if fields.get("engine") != ENGINE or fields.get("recovery_locked") != str(not authorized):
+        if (fields.get("engine") != ENGINE or fields.get("recovery_locked") != str(not authorized)
+                or fields.get("veto_controls") != "v2" or fields.get("futures_wallet_version") != "v2"):
             return False
         if authorized:
             cycles = [r for r in rows if r["user_id"] == uid and r["event_type"] == "cycle_status"]
@@ -279,6 +280,11 @@ def main() -> None:
                 print("WORKER_READY " + args.revision, flush=True)
                 print("Aktiv kodemappe: " + str(stage), flush=True)
                 print(f"Motor={ENGINE}; kontoer={len(expected)}; eksisterende innstillinger og tilstand bevart.", flush=True)
+                for uid in expected:
+                    heartbeat = max((r for r in rows if r["user_id"] == uid and r["event_type"] == "heartbeat"), key=lambda r: r["created_at"])
+                    fields = dict(part.split("=", 1) for part in heartbeat["message"].split(";") if "=" in part)
+                    details = {k: v for k, v in fields.items() if k.startswith("futures_") or k in {"veto_controls", "veto_ignored"}}
+                    print("Kontroll " + uid + ": " + json.dumps(details, ensure_ascii=False), flush=True)
                 print("Tilstand: " + json.dumps(state_summary(read_states(STATE_ROOT))), flush=True)
                 return
             time.sleep(5)

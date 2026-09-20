@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Sequence
+from typing import Mapping, Sequence
 
 
 @dataclass(frozen=True)
@@ -46,7 +46,8 @@ def _rsi(values: Sequence[Decimal], period: int = 14) -> Decimal:
     return Decimal("100") - Decimal("100") / (Decimal("1") + rs)
 
 
-def analyze_scalp(timeframes: dict[str, Sequence[Sequence[object]]], *, aggressive: bool = False) -> ScalpAnalysis:
+def analyze_scalp(timeframes: dict[str, Sequence[Sequence[object]]], *, aggressive: bool = False,
+                  veto_overrides: Mapping[str, object] | None = None) -> ScalpAnalysis:
     required = {"1m", "5m"}
     if not required.issubset(timeframes):
         raise ValueError("1m and 5m data are required")
@@ -90,7 +91,8 @@ def analyze_scalp(timeframes: dict[str, Sequence[Sequence[object]]], *, aggressi
         score += 1
         reasons.append("10m_breakout")
 
-    overextended = rsi >= Decimal("82") or momentum >= Decimal("2.5")
+    rsi_veto = rsi >= Decimal("82") and (veto_overrides or {}).get("ignore_rsi_high_veto") is not True
+    overextended = rsi_veto or momentum >= Decimal("2.5")
     falling = _ema(closes_1m, 5) < _ema(closes_1m, 13) and not _ema_rising(closes_1m, 5)
     veto = overextended or falling
     if overextended:

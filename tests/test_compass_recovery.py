@@ -35,7 +35,7 @@ class CompassRecoveryTests(unittest.TestCase):
              patch.object(worker, "free_quote_balance", return_value=Decimal(0)), \
              patch.object(worker, "market_scan", return_value=scan), \
              patch.object(worker, "binance_account_summary", return_value=("",Decimal(0),Decimal(0),"","")), \
-             patch.object(worker, "futures_wallet_summary", return_value=(Decimal(0),Decimal(0))), \
+             patch.object(worker, "futures_wallet_summary", return_value=worker.FuturesWallet("USDC", total=Decimal(0), available=Decimal(0))), \
              patch.object(worker, "recover_positions_from_trade_history") as recover, \
              patch.object(worker, "run_portfolio_cycle") as spot, \
              patch.object(worker, "run_short_cycle") as short, \

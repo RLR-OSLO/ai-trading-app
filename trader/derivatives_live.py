@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from .binance import BinanceCredentials, BinanceError
 from .derivatives import BinanceFuturesClient, BinanceMarginClient
+from .futures_wallet import read_futures_wallet, funded_notional
 from .journal import checkpoint_trade, flush_reports
 
 
@@ -343,7 +344,22 @@ def _open_futures(
     report_trade: Callable[[dict[str, Any]], None] | None,
 ) -> str:
     client = BinanceFuturesClient(credentials)
-    client.set_isolated_margin(symbol=symbol, live_trading_enabled=True)
+    quote = next((asset for asset in ("USDC", "USDT") if symbol.endswith(asset)), None)
+    if quote is None:
+        return "futures_balance_unavailable"
+    try:
+        wallet = read_futures_wallet(client, quote)
+    except Exception:
+        return "futures_balance_unavailable"
+    if wallet.status != "ready":
+        return f"futures_{wallet.status}"
+    notional = funded_notional(wallet, notional, leverage)
+    if notional < Decimal("5"):
+        return "short_notional_below_minimum"
+    # Multi-assets accounts already use cross margin; forcing isolated would
+    # reject otherwise funded orders. Keep the existing exchange account mode.
+    if wallet.mode == "single":
+        client.set_isolated_margin(symbol=symbol, live_trading_enabled=True)
     client.set_leverage(symbol=symbol, leverage=leverage, live_trading_enabled=True)
     quantity = client.quantity_for_notional(symbol=symbol, notional=notional)
     state.pending_open = {"mode": "futures", "symbol": symbol, "client_id": f"ait-fs-{uuid4().hex[:24]}",
