@@ -11,6 +11,7 @@ from .analysis import MarketAnalysis, analyze_market, bullish_btc_regime
 from .directional import BearishAnalysis, analyze_bearish_market
 from .derivatives_live import run_short_cycle, load_state as load_derivatives_state
 from .derivatives import BinanceFuturesClient
+from .futures_wallet import FuturesWallet, read_futures_wallet
 from .binance import BinanceCredentials, BinanceError, BinanceSpotClient
 from .config import DEFAULT_CONFIG
 from .news import NewsMonitor
@@ -217,27 +218,14 @@ def binance_account_summary(client: BinanceSpotClient, quote_asset: str) -> tupl
     return balance_text, total, invested, wallet_value_text, wallet_breakdown_text
 
 
-def futures_wallet_summary(credentials: BinanceCredentials | None, quote_asset: str) -> tuple[Decimal, Decimal]:
+def futures_wallet_summary(credentials: BinanceCredentials | None, quote_asset: str) -> FuturesWallet:
     if credentials is None:
-        return Decimal("0"), Decimal("0")
+        return FuturesWallet(quote_asset, status="not_connected")
     try:
-        account = BinanceFuturesClient(credentials).account()
-        # In Futures Credits / multi-asset modes Binance can expose the real cash
-        # balance on the per-asset row even when top-level totals are not useful.
-        assets = account.get("assets", []) or []
-        quote_row = next((row for row in assets if str(row.get("asset", "")).upper() == quote_asset.upper()), None)
-        if quote_row is not None:
-            wallet = Decimal(str(quote_row.get("walletBalance", quote_row.get("marginBalance", "0")) or "0"))
-            available = Decimal(str(quote_row.get("availableBalance", quote_row.get("maxWithdrawAmount", "0")) or "0"))
-            if wallet != 0 or available != 0:
-                return wallet, available
-        return (
-            Decimal(str(account.get("totalWalletBalance", "0") or "0")),
-            Decimal(str(account.get("availableBalance", "0") or "0")),
-        )
+        return read_futures_wallet(BinanceFuturesClient(credentials), quote_asset)
     except Exception:
-        LOG.exception("could not read futures wallet summary")
-        return Decimal("0"), Decimal("0")
+        LOG.warning("could not read futures wallet summary", exc_info=True)
+        return FuturesWallet(quote_asset)
 
 
 def bullrun_candidate(analysis: MarketAnalysis, scalp: ScalpAnalysis, risk_profile: str) -> bool:
@@ -292,10 +280,10 @@ def market_scan(
     btc_regime = bullish_btc_regime(btc_frames)
     news = news_monitor.score()
     analyses = {pair: analyze_market(data, veto_overrides) for pair, data in swing_frames.items()}
-    bearish_analyses = {pair: analyze_bearish_market(data) for pair, data in swing_frames.items()}
+    bearish_analyses = {pair: analyze_bearish_market(data, veto_overrides) for pair, data in swing_frames.items()}
     aggressive_scalping = risk_profile in {"high", "extreme"}
     scalp_analyses = {
-        pair: analyze_scalp(data, aggressive=aggressive_scalping)
+        pair: analyze_scalp(data, aggressive=aggressive_scalping, veto_overrides=veto_overrides)
         for pair, data in scalp_frames.items()
     }
 
@@ -358,9 +346,11 @@ def market_scan(
     context = (
         f"threshold={effective_swing_threshold};base_threshold={swing_threshold};risk={risk_profile};btc_regime={btc_regime};"
         f"news={news.score:.2f};news_penalty={news_penalty};headlines={news.fresh_headlines};scalp={scalp_signal_text};bullrun={bullrun_text};shorts={short_text};"
-        "veto_controls=v1;"
+        "veto_controls=v2;short_threshold=7;"
         + "veto_ignored=" + (",".join(name for name in ("rsi_high", "rsi_low", "atr") if (veto_overrides or {}).get("ignore_" + name + "_veto") is True) or "none") + ";"
         + "indicators=" + ",".join(f"{pair}:{a.rsi_1h:.2f}:{a.atr_percent_1h:.3f}" for pair, a in analyses.items())
+        + ";short_vetoes=" + (",".join(f"{pair}:{'|'.join(r for r in a.reasons if r in {'rsi_low_veto', 'rsi_high_veto', 'atr_veto'})}"
+                                      for pair, a in bearish_analyses.items() if "short_risk_veto" in a.reasons) or "none")
     )
     return signals, short_signals, analyses, bearish_analyses, scalp_analyses, strategies, context
 
@@ -567,13 +557,20 @@ def main() -> None:
                     if f"{asset}{quote_asset}" in ticker_prices
                 )
                 balances_text, spot_total, invested_value, wallet_value_text, wallet_breakdown_text = binance_account_summary(client, quote_asset)
-                futures_total, futures_available = futures_wallet_summary(client.credentials, quote_asset)
-                account_total = spot_total + futures_total
+                futures_wallet = futures_wallet_summary(client.credentials, quote_asset)
+                # The wallet endpoint values all Futures assets in the selected
+                # quote; account.availableBalance is a separate trading limit.
+                futures_value = next((Decimal(row.rsplit(":", 1)[1]) for row in wallet_breakdown_text.split(",")
+                                      if row.rsplit(":", 1)[0] == "USDⓈ-M Futures"), None)
+                if futures_value is None:
+                    futures_value = futures_wallet.total if futures_wallet.mode == "multi" or not any(
+                        asset != quote_asset for asset in futures_wallet.assets) else None
+                account_total = spot_total + futures_value if futures_value is not None else "unknown"
                 reporter.record_event(
                     "heartbeat",
                     f"engine=user-commands-v5;user_commands={'ready' if master_live and client.credentials is not None else 'disabled'};recovery_locked={recovery_locked};live={allow_new_entries};available={available_balance};quote={quote_asset};{context};"
                     f"signals={signal_text};scores={score_text};scalp_scores={scalp_score_text};short_scores={short_score_text};"
-                    f"prices={price_text};balances={balances_text};wallet_values={wallet_value_text};wallets={wallet_breakdown_text};account_total={account_total};spot_total={spot_total};spot_available={available_balance};futures_total={futures_total};futures_available={futures_available};invested_value={invested_value};markets={','.join(pairs)};"
+                    f"prices={price_text};balances={balances_text};wallet_values={wallet_value_text};wallets={wallet_breakdown_text};account_total={account_total};spot_total={spot_total};spot_available={available_balance};{futures_wallet.heartbeat()};futures_value={futures_value if futures_value is not None else 'unknown'};invested_value={invested_value};markets={','.join(pairs)};"
                     f"best={best_pair}:{strategies[best_pair]}:{analyses[best_pair].score}/{scalp_analyses[best_pair].score};"
                     f"reasons={','.join(scalp_analyses[best_pair].reasons if strategies[best_pair] == 'scalp' else analyses[best_pair].reasons)}",
                 )

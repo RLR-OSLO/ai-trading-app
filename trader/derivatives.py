@@ -132,6 +132,9 @@ class BinanceFuturesClient(BinanceSpotClient):
     def account(self) -> dict[str, Any]:
         return self._request("GET", "/fapi/v2/account", signed=True)
 
+    def asset_index(self, asset: str) -> dict[str, Any]:
+        return self._request("GET", "/fapi/v1/assetIndex", {"symbol": f"{asset}USD"})
+
     def position_risk(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
         params = {"symbol": symbol} if symbol else {}
         return self._request("GET", "/fapi/v2/positionRisk", params, signed=True)
@@ -156,6 +159,9 @@ class BinanceFuturesClient(BinanceSpotClient):
         qty = (notional / price / step).to_integral_value(rounding=ROUND_DOWN) * step
         if qty < minimum:
             raise BinanceError(f"Futures quantity below minimum for {symbol}")
+        minimum_notional = next((x for x in row.get("filters", []) if x.get("filterType") == "MIN_NOTIONAL"), {})
+        if qty * price < Decimal(str(minimum_notional.get("notional", "0"))):
+            raise BinanceError(f"Futures notional below minimum for {symbol}")
         precision = int(row.get("quantityPrecision", max(0, -step.normalize().as_tuple().exponent)))
         quantum = Decimal("1").scaleb(-precision)
         return qty.quantize(quantum, rounding=ROUND_DOWN)

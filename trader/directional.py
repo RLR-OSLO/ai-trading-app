@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Sequence
+from typing import Mapping, Sequence
+
+from .analysis import entry_vetoes
 
 
 @dataclass(frozen=True)
@@ -55,7 +57,8 @@ def _atr_percent(klines: Sequence[Sequence[object]], period: int = 14) -> Decima
     return (sum(ranges, Decimal("0")) / Decimal(period)) / close * Decimal("100")
 
 
-def analyze_bearish_market(timeframes: dict[str, Sequence[Sequence[object]]]) -> BearishAnalysis:
+def analyze_bearish_market(timeframes: dict[str, Sequence[Sequence[object]]],
+                           veto_overrides: Mapping[str, object] | None = None) -> BearishAnalysis:
     required = {"15m", "1h", "4h"}
     if not required.issubset(timeframes):
         raise ValueError("15m, 1h and 4h data are required")
@@ -91,7 +94,8 @@ def analyze_bearish_market(timeframes: dict[str, Sequence[Sequence[object]]]) ->
         score += 1
         reasons.append("tradable_volatility")
 
-    veto = rsi <= Decimal("25") or rsi >= Decimal("70") or atr_percent > Decimal("8")
+    veto = entry_vetoes(rsi, atr_percent, veto_overrides, short=True)
+    reasons.extend(name + "_veto" for name in veto)
     if veto:
         reasons.append("short_risk_veto")
     confidence = min(Decimal("1"), Decimal(score) / Decimal("9"))

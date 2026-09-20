@@ -31,6 +31,11 @@ export function cycleDescription(value: string): string {
     trailing_raise: "Gevinstsikringen er flyttet opp",
     protected: "Posisjonen har beskyttelsesordre hos Binance",
     short_notional_below_minimum: "For lite tilgjengelig beløp til ny short",
+    futures_no_available_margin: "Binance rapporterer ingen tilgjengelig futuresmargin",
+    futures_no_quote_collateral: "Futuresmidlene er ikke tilgjengelige i kontraktens handelsvaluta",
+    futures_margin_in_use: "Futuresmargin er bundet i posisjoner eller åpne ordre",
+    futures_trading_disabled: "Binance har deaktivert futureshandel på kontoen",
+    futures_balance_unavailable: "Kunne ikke bekrefte tilgjengelig futuresmargin",
   };
   if (labels[code]) return labels[code];
   if (code.startsWith("insufficient_")) return "For lite ledig beløp i valgt handelsvaluta";

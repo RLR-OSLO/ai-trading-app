@@ -63,10 +63,11 @@ def _macd_positive(values: Sequence[Decimal]) -> bool:
     return _ema(values, 12) > _ema(values, 26)
 
 
-def entry_vetoes(rsi: Decimal, atr: Decimal, overrides: Mapping[str, object] | None = None) -> tuple[str, ...]:
+def entry_vetoes(rsi: Decimal, atr: Decimal, overrides: Mapping[str, object] | None = None,
+                 *, short: bool = False) -> tuple[str, ...]:
     options = overrides or {}
-    checks = (("rsi_high", rsi >= Decimal("75")),
-              ("rsi_low", rsi <= Decimal("35")),
+    checks = (("rsi_high", rsi >= Decimal("70" if short else "75")),
+              ("rsi_low", rsi <= Decimal("25" if short else "35")),
               ("atr", atr > Decimal("8")))
     return tuple(name for name, triggered in checks
                  if triggered and options.get("ignore_" + name + "_veto") is not True)
